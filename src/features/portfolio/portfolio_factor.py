@@ -13,7 +13,7 @@ import statsmodels.api as sm
 import plotly.graph_objects as go
 import plotly.express as px
 
-from stocker.cloud.portfolio_config import PortfolioConfig
+from src.features.portfolio.portfolio_config import PortfolioConfig
 
 # Configure logging
 logger = logging.getLogger(__name__)

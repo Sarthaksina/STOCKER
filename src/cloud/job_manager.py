@@ -31,6 +31,7 @@ class JobStatus:
     FAILED = "FAILED"
     STOPPED = "STOPPED"
     UNKNOWN = "UNKNOWN"
+    FALLBACK_LOCAL = "FALLBACK_LOCAL"  # New status for local fallback execution
 
 class CloudJobManager:
     """
@@ -54,7 +55,12 @@ class CloudJobManager:
         self.status_queue = queue.Queue()
         self._monitoring_thread = None
         self._stop_monitoring = threading.Event()
-    
+        
+        # Fallback configuration
+        self.enable_fallback = True
+        self.fallback_timeout = 30  # seconds to wait before falling back to local
+        self.max_retries = 3
+        
     def submit_training_job(self,
                          model_type: str,
                          data_path: str,
@@ -64,7 +70,8 @@ class CloudJobManager:
                          data_size_mb: Optional[float] = None,
                          max_budget: Optional[float] = None,
                          max_runtime_hours: Optional[int] = None,
-                         monitor: bool = False) -> str:
+                         monitor: bool = False,
+                         allow_fallback: bool = True) -> str:
         """
         Submit a model training job to the cloud.
         
@@ -78,6 +85,7 @@ class CloudJobManager:
             max_budget: Maximum budget for training
             max_runtime_hours: Maximum runtime hours
             monitor: Whether to start monitoring the job
+            allow_fallback: Whether to allow fallback to local execution
             
         Returns:
             Job ID
@@ -86,61 +94,173 @@ class CloudJobManager:
         if job_name is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             job_name = f"stocker_{model_type}_{timestamp}"
-        
-        # Submit job with cost optimization if requested
-        if optimize_cost:
-            job_id, optimized = self.optimizer.submit_cost_optimized_job(
-                job_name=job_name,
-                model_type=model_type,
-                data_path=data_path,
-                config=config,
-                data_size_mb=data_size_mb,
-                max_budget=max_budget,
-                max_runtime_hours=max_runtime_hours
-            )
             
-            # Store optimized configuration
-            self.job_registry[job_id] = {
-                "job_id": job_id,
-                "job_name": job_name,
-                "model_type": model_type,
-                "data_path": data_path,
-                "config": optimized["model_config"],
-                "training_config": optimized["training_config"],
-                "estimated_cost": optimized["estimated_cost"],
-                "submit_time": datetime.now().isoformat(),
-                "status": JobStatus.PENDING
-            }
-        else:
-            # Submit job directly
-            job_id = self.client.submit_job(
-                job_name=job_name,
-                model_type=model_type,
-                data_path=data_path,
-                config=config,
-                instance_type=None,  # Use default
-                max_runtime_hours=max_runtime_hours
-            )
-            
-            # Store job information
-            self.job_registry[job_id] = {
-                "job_id": job_id,
-                "job_name": job_name,
-                "model_type": model_type,
-                "data_path": data_path,
-                "config": config,
-                "submit_time": datetime.now().isoformat(),
-                "status": JobStatus.PENDING
-            }
-        
-        logger.info(f"Submitted {model_type} training job: {job_name} (ID: {job_id})")
+        # Try to submit to cloud with retries
+        job_id = None
+        for attempt in range(self.max_retries):
+            try:
+                # Submit job with cost optimization if requested
+                if optimize_cost:
+                    job_id, optimized = self.optimizer.submit_cost_optimized_job(
+                        job_name=job_name,
+                        model_type=model_type,
+                        data_path=data_path,
+                        config=config,
+                        data_size_mb=data_size_mb,
+                        max_budget=max_budget,
+                        max_runtime_hours=max_runtime_hours
+                    )
+                    
+                    # Store optimized configuration
+                    self.job_registry[job_id] = {
+                        "job_id": job_id,
+                        "job_name": job_name,
+                        "model_type": model_type,
+                        "data_path": data_path,
+                        "config": optimized["model_config"],
+                        "training_config": optimized["training_config"],
+                        "estimated_cost": optimized["estimated_cost"],
+                        "submit_time": datetime.now().isoformat(),
+                        "status": JobStatus.PENDING
+                    }
+                else:
+                    # Submit job directly
+                    job_id = self.client.submit_job(
+                        job_name=job_name,
+                        model_type=model_type,
+                        data_path=data_path,
+                        config=config,
+                        instance_type=None,  # Use default
+                        max_runtime_hours=max_runtime_hours
+                    )
+                    
+                    # Store job information
+                    self.job_registry[job_id] = {
+                        "job_id": job_id,
+                        "job_name": job_name,
+                        "model_type": model_type,
+                        "data_path": data_path,
+                        "config": config,
+                        "submit_time": datetime.now().isoformat(),
+                        "status": JobStatus.PENDING
+                    }
+                
+                logger.info(f"Submitted {model_type} training job: {job_name} (ID: {job_id})")
+                break  # Success, exit retry loop
+                
+            except ConnectionError as e:
+                logger.warning(f"Connection error submitting job (attempt {attempt+1}/{self.max_retries}): {e}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(2 ** attempt)  # Exponential backoff
+            except Exception as e:
+                logger.error(f"Error submitting job: {e}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(2 ** attempt)  # Exponential backoff
+                else:
+                    # All retries failed
+                    if allow_fallback and self.enable_fallback:
+                        logger.info(f"Falling back to local execution for {model_type} job: {job_name}")
+                        return self._execute_job_locally(model_type, data_path, config, job_name)
+                    else:
+                        raise
         
         # Start monitoring if requested
-        if monitor:
+        if monitor and job_id:
             self.start_job_monitoring([job_id])
         
         return job_id
     
+    def _execute_job_locally(self, model_type: str, data_path: str, 
+                           config: Dict[str, Any], job_name: str) -> str:
+        """
+        Execute a training job locally as fallback
+        
+        Args:
+            model_type: Type of model to train
+            data_path: Path to training data
+            config: Model configuration
+            job_name: Job name
+            
+        Returns:
+            Job ID (generated for tracking)
+        """
+        # Generate a local job ID
+        job_id = f"local_{job_name}_{int(time.time())}"
+        
+        # Store job information
+        self.job_registry[job_id] = {
+            "job_id": job_id,
+            "job_name": job_name,
+            "model_type": model_type,
+            "data_path": data_path,
+            "config": config,
+            "submit_time": datetime.now().isoformat(),
+            "status": JobStatus.FALLBACK_LOCAL,
+            "is_local": True
+        }
+        
+        # Start a thread to execute the job locally
+        thread = threading.Thread(
+            target=self._run_local_training,
+            args=(job_id, model_type, data_path, config),
+            daemon=True
+        )
+        thread.start()
+        
+        logger.info(f"Started local fallback training for {model_type} job: {job_name} (ID: {job_id})")
+        return job_id
+    
+    def _run_local_training(self, job_id: str, model_type: str, 
+                          data_path: str, config: Dict[str, Any]) -> None:
+        """
+        Run a training job locally
+        
+        Args:
+            job_id: Job ID
+            model_type: Type of model to train
+            data_path: Path to training data
+            config: Model configuration
+        """
+        try:
+            # Update job status
+            self.job_registry[job_id]["status"] = JobStatus.RUNNING
+            
+            # Load data
+            data = pd.read_csv(data_path) if isinstance(data_path, str) else data_path
+            
+            # Initialize model based on type
+            if model_type == "lstm":
+                model = LSTMModel(**config)
+            elif model_type == "xgboost":
+                model = XGBoostModel(**config)
+            elif model_type == "lightgbm":
+                model = LightGBMModel(**config)
+            elif model_type == "ensemble":
+                model = EnsembleModel(**config)
+            else:
+                raise ValueError(f"Unsupported model type: {model_type}")
+            
+            # Train model
+            model.train(data)
+            
+            # Save model
+            output_dir = os.path.join("models", "local_fallback", job_id)
+            os.makedirs(output_dir, exist_ok=True)
+            model_path = os.path.join(output_dir, "model.pkl")
+            model.save(model_path)
+            
+            # Update job status
+            self.job_registry[job_id]["status"] = JobStatus.COMPLETED
+            self.job_registry[job_id]["completion_time"] = datetime.now().isoformat()
+            self.job_registry[job_id]["output_path"] = model_path
+            
+            logger.info(f"Completed local training for job {job_id}")
+            
+        except Exception as e:
+            logger.error(f"Error in local training for job {job_id}: {e}")
+            self.job_registry[job_id]["status"] = JobStatus.FAILED
+            self.job_registry[job_id]["error"] = str(e)
+
     def submit_ensemble_training(self,
                                ensemble_config: Dict[str, Any],
                                data_path: str,
@@ -603,4 +723,4 @@ class CloudJobManager:
             return True
         except Exception as e:
             logger.error(f"Failed to cancel job {job_id}: {e}")
-            return False 
+            return False

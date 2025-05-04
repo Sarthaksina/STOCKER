@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import logging
+import warnings
 from typing import Dict, List, Tuple, Optional, Any, Union, Callable
 from datetime import datetime, timedelta
 
@@ -385,120 +386,316 @@ class PortfolioBacktester:
             'impact': {
                 'return_impact': stressed_metrics['expected_return'] - normal_metrics['expected_return'],
                 'volatility_impact': stressed_metrics['volatility'] - normal_metrics['volatility'],
-                'sharpe_ratio_impact': stressed_metrics['sharpe_ratio'] - normal_metrics['sharpe_ratio'],
-                'var_impact': stressed_metrics['var_95'] - normal_metrics['var_95']
-            },
-            'monte_carlo': {
-                'var': var_threshold,
-                'cvar': cvar,
-                'prob_negative_return': prob_negative,
-                'prob_below_10pct': prob_below_10pct,
-                'mean_return': np.mean(simulated_returns),
-                'std_return': np.std(simulated_returns),
-                'min_return': np.min(simulated_returns),
-                'max_return': np.max(simulated_returns)
+                'var_impact': stressed_metrics['var_95'] - normal_metrics['var_95'],
+                'sharpe_impact': stressed_metrics['sharpe_ratio'] - normal_metrics['sharpe_ratio']
             }
         }
     
+    def compare_strategies(self,
+                          price_data: pd.DataFrame,
+                          strategy_funcs: Dict[str, Callable],
+                          initial_capital: float = 10000.0,
+                          start_date: Optional[str] = None,
+                          end_date: Optional[str] = None,
+                          benchmark_ticker: Optional[str] = None,
+                          rebalance_frequency: str = 'monthly') -> Dict[str, Any]:
+        """
+        Compare multiple portfolio strategies
+        
+        Args:
+            price_data: DataFrame of asset prices
+            strategy_funcs: Dictionary mapping strategy names to strategy functions
+            initial_capital: Initial capital
+            start_date: Start date for backtest
+            end_date: End date for backtest
+            benchmark_ticker: Ticker for benchmark comparison
+            rebalance_frequency: Frequency to rebalance
+            
+        Returns:
+            Dictionary with comparison results
+        """
+        # Run backtest for each strategy
+        results = {}
+        for name, strategy_func in strategy_funcs.items():
+            results[name] = self.backtest_strategy(
+                price_data=price_data,
+                strategy_func=strategy_func,
+                initial_capital=initial_capital,
+                start_date=start_date,
+                end_date=end_date,
+                benchmark_ticker=benchmark_ticker,
+                rebalance_frequency=rebalance_frequency
+            )
+        
+        # Calculate comparison metrics
+        comparison = {
+            'strategies': list(strategy_funcs.keys()),
+            'metrics': {},
+            'returns': {},
+            'values': {},
+            'drawdowns': {}
+        }
+        
+        # Extract key metrics for comparison
+        for name, result in results.items():
+            comparison['metrics'][name] = result['metrics']
+            comparison['returns'][name] = result['portfolio_returns']
+            comparison['values'][name] = result['portfolio_values']
+            comparison['drawdowns'][name] = result['drawdowns']
+        
+        # Add benchmark if available
+        if benchmark_ticker and benchmark_ticker in price_data.columns:
+            benchmark_prices = price_data[benchmark_ticker]
+            benchmark_returns = benchmark_prices.pct_change().dropna()
+            benchmark_values = initial_capital * (1 + benchmark_returns).cumprod()
+            
+            comparison['benchmark_returns'] = benchmark_returns
+            comparison['benchmark_values'] = benchmark_values
+        
+        return comparison
+    
     def plot_backtest_results(self,
-                            backtest_results: Dict[str, Any],
-                            benchmark_name: str = 'Benchmark',
-                            save_path: Optional[str] = None) -> plt.Figure:
+                             backtest_results: Dict[str, Any],
+                             save_path: Optional[str] = None) -> plt.Figure:
         """
         Plot backtest results
         
         Args:
-            backtest_results: Results from backtest_strategy
-            benchmark_name: Name of benchmark for plot labels
-            save_path: Path to save the plot (if None, display plot)
+            backtest_results: Dictionary with backtest results
+            save_path: Optional path to save the figure
             
         Returns:
-            Matplotlib figure object
+            Matplotlib figure
         """
-        # Extract data
-        portfolio_values = backtest_results['portfolio_values']
-        portfolio_returns = backtest_results['portfolio_returns']
-        drawdowns = backtest_results['drawdowns']
-        metrics = backtest_results['metrics']
-        
         # Create figure with subplots
-        fig = plt.figure(figsize=(15, 12))
-        gs = fig.add_gridspec(3, 2)
+        fig, axs = plt.subplots(3, 1, figsize=(12, 10), sharex=True, gridspec_kw={'height_ratios': [3, 1, 1]})
         
         # Plot portfolio value
-        ax1 = fig.add_subplot(gs[0, :])
-        ax1.plot(portfolio_values, label='Portfolio', linewidth=2)
+        portfolio_values = backtest_results['portfolio_values']
+        axs[0].plot(portfolio_values.index, portfolio_values, label='Portfolio')
         
-        # Add benchmark if available
+        # Plot benchmark if available
         if 'benchmark_returns' in backtest_results and backtest_results['benchmark_returns'] is not None:
-            # Calculate benchmark values (assuming same initial investment)
-            initial_value = portfolio_values.iloc[0]
             benchmark_returns = backtest_results['benchmark_returns']
-            benchmark_values = initial_value * (1 + benchmark_returns).cumprod()
-            ax1.plot(benchmark_values, label=benchmark_name, linewidth=2, alpha=0.7)
+            benchmark_values = portfolio_values.iloc[0] * (1 + benchmark_returns).cumprod()
+            axs[0].plot(benchmark_values.index, benchmark_values, label='Benchmark', linestyle='--')
         
-        ax1.set_title('Portfolio Value Over Time', fontsize=14)
-        ax1.set_ylabel('Value ($)')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
+        axs[0].set_title('Portfolio Value')
+        axs[0].set_ylabel('Value')
+        axs[0].legend()
+        axs[0].grid(True)
         
         # Plot drawdowns
-        ax2 = fig.add_subplot(gs[1, :])
-        ax2.fill_between(drawdowns.index, drawdowns.values, 0, color='red', alpha=0.3)
-        ax2.set_title('Portfolio Drawdowns', fontsize=14)
-        ax2.set_ylabel('Drawdown (%)')
-        ax2.grid(True, alpha=0.3)
+        drawdowns = backtest_results['drawdowns']
+        axs[1].fill_between(drawdowns.index, 0, drawdowns, color='red', alpha=0.3)
+        axs[1].set_title('Drawdowns')
+        axs[1].set_ylabel('Drawdown')
+        axs[1].grid(True)
         
-        # Plot rolling metrics
-        ax3 = fig.add_subplot(gs[2, 0])
+        # Plot returns
+        returns = backtest_results['portfolio_returns']
+        axs[2].bar(returns.index, returns, color='blue', alpha=0.5)
+        axs[2].set_title('Daily Returns')
+        axs[2].set_ylabel('Return')
+        axs[2].set_xlabel('Date')
+        axs[2].grid(True)
         
-        # Calculate rolling volatility (annualized)
-        rolling_vol = portfolio_returns.rolling(window=21).std() * np.sqrt(252)
-        ax3.plot(rolling_vol, color='orange', label='Rolling Volatility (21d)')
-        ax3.set_title('Rolling Volatility (Annualized)', fontsize=14)
-        ax3.set_ylabel('Volatility')
-        ax3.grid(True, alpha=0.3)
+        # Adjust layout
+        plt.tight_layout()
         
-        # Plot rolling returns
-        ax4 = fig.add_subplot(gs[2, 1])
-        
-        # Calculate rolling returns (annualized)
-        rolling_returns = portfolio_returns.rolling(window=63).mean() * 252
-        ax4.plot(rolling_returns, color='green', label='Rolling Returns (63d)')
-        ax4.set_title('Rolling Returns (Annualized)', fontsize=14)
-        ax4.set_ylabel('Return')
-        ax4.grid(True, alpha=0.3)
-        
-        # Add metrics as text
-        metrics_text = (
-            f"Total Return: {metrics['total_return']:.2%}\n"
-            f"Annualized Return: {metrics['annualized_return']:.2%}\n"
-            f"Volatility: {metrics['volatility']:.2%}\n"
-            f"Sharpe Ratio: {metrics['sharpe_ratio']:.2f}\n"
-            f"Sortino Ratio: {metrics['sortino_ratio']:.2f}\n"
-            f"Max Drawdown: {metrics['max_drawdown']:.2%}\n"
-            f"Calmar Ratio: {metrics['calmar_ratio']:.2f}"
-        )
-        
-        # Add benchmark metrics if available
-        if 'benchmark_return' in metrics:
-            benchmark_text = (
-                f"\n\n{benchmark_name} Metrics:\n"
-                f"Total Return: {metrics['benchmark_return']:.2%}\n"
-                f"Annualized Return: {metrics['benchmark_annualized']:.2%}\n"
-                f"Information Ratio: {metrics['information_ratio']:.2f}\n"
-                f"Beta: {metrics['beta']:.2f}\n"
-                f"Alpha: {metrics['alpha']:.2%}"
-            )
-            metrics_text += benchmark_text
-        
-        plt.figtext(0.15, 0.01, metrics_text, fontsize=10, va='bottom',
-                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
-        
-        plt.tight_layout(rect=[0, 0.05, 1, 0.95])
-        
-        # Save or return figure
+        # Save figure if path provided
         if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.savefig(save_path)
         
         return fig
+    
+    def plot_strategy_comparison(self,
+                               comparison_results: Dict[str, Any],
+                               save_path: Optional[str] = None) -> plt.Figure:
+        """
+        Plot strategy comparison
+        
+        Args:
+            comparison_results: Dictionary with comparison results
+            save_path: Optional path to save the figure
+            
+        Returns:
+            Matplotlib figure
+        """
+        # Create figure with subplots
+        fig, axs = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+        
+        # Plot portfolio values
+        for strategy, values in comparison_results['values'].items():
+            axs[0].plot(values.index, values, label=strategy)
+        
+        # Plot benchmark if available
+        if 'benchmark_values' in comparison_results:
+            benchmark_values = comparison_results['benchmark_values']
+            axs[0].plot(benchmark_values.index, benchmark_values, label='Benchmark', linestyle='--', color='black')
+        
+        axs[0].set_title('Portfolio Value Comparison')
+        axs[0].set_ylabel('Value')
+        axs[0].legend()
+        axs[0].grid(True)
+        
+        # Plot drawdowns
+        for strategy, drawdowns in comparison_results['drawdowns'].items():
+            axs[1].plot(drawdowns.index, drawdowns, label=strategy)
+        
+        axs[1].set_title('Drawdown Comparison')
+        axs[1].set_ylabel('Drawdown')
+        axs[1].set_xlabel('Date')
+        axs[1].legend()
+        axs[1].grid(True)
+        
+        # Adjust layout
+        plt.tight_layout()
+        
+        # Save figure if path provided
+        if save_path:
+            plt.savefig(save_path)
+        
+        return fig
+
+
+# --- Deprecated functions from portfolio_backtest.py for backward compatibility ---
+
+# Issue deprecation warning
+warnings.warn(
+    "The portfolio_backtest module is deprecated. Please use PortfolioBacktester from portfolio_backtester instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
+
+def backtest_portfolio(price_data: pd.DataFrame, 
+                      weights: np.ndarray, 
+                      start_date: Optional[str] = None, 
+                      end_date: Optional[str] = None,
+                      benchmark_ticker: Optional[str] = None,
+                      initial_investment: float = 10000.0,
+                      rebalance_frequency: Optional[str] = None,
+                      config: Optional[PortfolioConfig] = None) -> Dict[str, Any]:
+    """
+    DEPRECATED: Use PortfolioBacktester.backtest_strategy instead.
+    
+    Backtest portfolio performance with advanced metrics
+    
+    Args:
+        price_data: DataFrame of asset prices
+        weights: Array of asset weights
+        start_date: Start date for backtest (if None, use first date in price_data)
+        end_date: End date for backtest (if None, use last date in price_data)
+        benchmark_ticker: Ticker symbol for benchmark (if None, use config default)
+        initial_investment: Initial investment amount
+        rebalance_frequency: Frequency to rebalance portfolio ('daily', 'weekly', 'monthly', 'quarterly', 'yearly', None)
+        config: Portfolio configuration
+        
+    Returns:
+        Dictionary with backtest results
+    """
+    warnings.warn(
+        "This function is deprecated. Please use PortfolioBacktester.backtest_strategy instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    
+    # Create a strategy function that always returns the same weights
+    def constant_weight_strategy(historical_data):
+        return weights
+    
+    # Use the PortfolioBacktester class instead
+    backtester = PortfolioBacktester(config=config)
+    results = backtester.backtest_strategy(
+        price_data=price_data,
+        strategy_func=constant_weight_strategy,
+        initial_capital=initial_investment,
+        start_date=start_date,
+        end_date=end_date,
+        benchmark_ticker=benchmark_ticker,
+        rebalance_frequency=rebalance_frequency or 'monthly'
+    )
+    
+    return results
+
+def plot_backtest_results(backtest_results: Dict[str, Any], 
+                         title: str = "Portfolio Backtest Results",
+                         figsize: Tuple[int, int] = (12, 8),
+                         save_path: Optional[str] = None) -> plt.Figure:
+    """
+    DEPRECATED: Use PortfolioBacktester.plot_backtest_results instead.
+    
+    Plot backtest results with portfolio value, drawdowns, and benchmark comparison
+    
+    Args:
+        backtest_results: Dictionary with backtest results from backtest_portfolio
+        title: Plot title
+        figsize: Figure size
+        save_path: Optional path to save the figure
+        
+    Returns:
+        Matplotlib figure
+    """
+    warnings.warn(
+        "This function is deprecated. Please use PortfolioBacktester.plot_backtest_results instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    
+    # Create a backtester instance and use its plotting method
+    backtester = PortfolioBacktester()
+    return backtester.plot_backtest_results(
+        backtest_results=backtest_results,
+        save_path=save_path
+    )
+
+def compare_strategies(price_data: pd.DataFrame,
+                      strategy_weights: Dict[str, np.ndarray],
+                      start_date: Optional[str] = None,
+                      end_date: Optional[str] = None,
+                      benchmark_ticker: Optional[str] = None,
+                      initial_investment: float = 10000.0,
+                      rebalance_frequency: str = 'monthly',
+                      config: Optional[PortfolioConfig] = None) -> Dict[str, Any]:
+    """
+    DEPRECATED: Use PortfolioBacktester.compare_strategies instead.
+    
+    Compare multiple portfolio strategies
+    
+    Args:
+        price_data: DataFrame of asset prices
+        strategy_weights: Dictionary mapping strategy names to weight arrays
+        start_date: Start date for backtest
+        end_date: End date for backtest
+        benchmark_ticker: Ticker symbol for benchmark
+        initial_investment: Initial investment amount
+        rebalance_frequency: Frequency to rebalance portfolio
+        config: Portfolio configuration
+        
+    Returns:
+        Dictionary with comparison results
+    """
+    warnings.warn(
+        "This function is deprecated. Please use PortfolioBacktester.compare_strategies instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
+    
+    # Create a backtester instance
+    backtester = PortfolioBacktester(config=config)
+    
+    # Convert strategy weights to strategy functions
+    strategy_funcs = {}
+    for name, weights in strategy_weights.items():
+        strategy_funcs[name] = lambda data, w=weights: w
+    
+    # Use the backtester's compare_strategies method
+    return backtester.compare_strategies(
+        price_data=price_data,
+        strategy_funcs=strategy_funcs,
+        initial_capital=initial_investment,
+        start_date=start_date,
+        end_date=end_date,
+        benchmark_ticker=benchmark_ticker,
+        rebalance_frequency=rebalance_frequency
+    )

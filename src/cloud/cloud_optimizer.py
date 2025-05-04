@@ -17,6 +17,18 @@ from src.cloud_training.thunder_compute import ThunderComputeClient
 
 logger = logging.getLogger(__name__)
 
+class CloudServiceError(Exception):
+    """Exception raised for cloud service errors"""
+    pass
+
+class CloudQuotaExceededError(CloudServiceError):
+    """Exception raised when cloud quota is exceeded"""
+    pass
+
+class CloudAuthenticationError(CloudServiceError):
+    """Exception raised for authentication errors"""
+    pass
+
 class CloudTrainingOptimizer:
     """
     Optimizes cloud-based model training for cost efficiency and reliability.
@@ -47,7 +59,50 @@ class CloudTrainingOptimizer:
             "lightgbm": "ml.c5.xlarge", # CPU for tree-based models
             "ensemble": "ml.c5.xlarge"  # CPU for ensemble operations
         }
+        
+        # Fallback options for when cloud services are unavailable
+        self.fallback_enabled = True
+        self.max_retries = 3
+        self.retry_delay = 5  # seconds
     
+    def _execute_with_fallback(self, cloud_func, fallback_func, *args, **kwargs):
+        """
+        Execute a cloud function with fallback to local execution
+        
+        Args:
+            cloud_func: Cloud function to execute
+            fallback_func: Fallback function to execute if cloud fails
+            *args, **kwargs: Arguments to pass to both functions
+            
+        Returns:
+            Result of either cloud_func or fallback_func
+        """
+        if not self.fallback_enabled:
+            # Just execute cloud function without fallback
+            return cloud_func(*args, **kwargs)
+            
+        # Try cloud execution with retries
+        for attempt in range(self.max_retries):
+            try:
+                return cloud_func(*args, **kwargs)
+            except (ConnectionError, TimeoutError) as e:
+                logger.warning(f"Cloud connection error (attempt {attempt+1}/{self.max_retries}): {e}")
+                time.sleep(self.retry_delay * (attempt + 1))  # Exponential backoff
+            except CloudAuthenticationError as e:
+                logger.error(f"Cloud authentication error: {e}")
+                break  # Don't retry auth errors
+            except CloudQuotaExceededError as e:
+                logger.error(f"Cloud quota exceeded: {e}")
+                break  # Don't retry quota errors
+            except Exception as e:
+                logger.error(f"Unexpected cloud error (attempt {attempt+1}/{self.max_retries}): {e}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(self.retry_delay)
+                    
+        # If we get here, all cloud attempts failed
+        logger.info("Falling back to local execution")
+        return fallback_func(*args, **kwargs)
+
     def recommend_instance(self, 
                           model_type: str, 
                           data_size_mb: float, 
@@ -438,4 +493,4 @@ class CloudTrainingOptimizer:
         logger.info(f"Submitted ensemble training with {len(base_model_ids)} base models")
         logger.info(f"Total estimated cost: ${result['total_estimated_cost']:.2f}")
         
-        return result 
+        return result

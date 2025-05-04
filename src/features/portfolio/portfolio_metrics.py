@@ -9,7 +9,7 @@ import pandas as pd
 import logging
 from typing import Dict, Optional
 
-from stocker.cloud.portfolio_config import PortfolioConfig
+from src.features.portfolio.portfolio_config import PortfolioConfig
 
 # Configure logging
 logger = logging.getLogger(__name__)

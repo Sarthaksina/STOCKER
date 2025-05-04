@@ -12,7 +12,7 @@ from scipy.stats import norm, t
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from stocker.cloud.portfolio_config import PortfolioConfig
+from src.features.portfolio.portfolio_config import PortfolioConfig
 
 # Configure logging
 logger = logging.getLogger(__name__)

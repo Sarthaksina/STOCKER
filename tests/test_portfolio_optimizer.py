@@ -9,7 +9,8 @@ from dotenv import load_dotenv
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Import the portfolio optimizer
-from stocker.cloud.portfolio_optimizer import ThunderComputePortfolioOptimizer
+from src.features.portfolio.portfolio_optimization import PerformanceOptimizer
+from src.features.portfolio.portfolio_config import PortfolioConfig
 
 def test_portfolio_optimizer():
     """Test the portfolio optimizer with sample data."""
@@ -33,36 +34,50 @@ def test_portfolio_optimizer():
         price_data[asset] = prices
     
     # Initialize the optimizer
-    optimizer = ThunderComputePortfolioOptimizer()
+    optimizer = PerformanceOptimizer()
     
-    # Optimize portfolio
-    result = optimizer.optimize_portfolio(price_data, use_cloud=False)
+    # Calculate returns
+    returns = price_data.pct_change().dropna()
+    
+    # Test parallel monte carlo simulation
+    weights = np.array([0.2, 0.2, 0.2, 0.2, 0.2])  # Equal weights
+    simulation_results = optimizer.parallel_monte_carlo(
+        returns=returns,
+        weights=weights,
+        initial_investment=10000.0,
+        simulation_length=252,
+        num_simulations=1000
+    )
+    
+    # Verify simulation results shape
+    assert simulation_results.shape[0] == 252
+    assert simulation_results.shape[1] >= 900  # Should be close to 1000
+    
+    # Test efficient frontier calculation
+    ef_results = optimizer.parallel_efficient_frontier(
+        returns=returns,
+        num_portfolios=500,
+        risk_free_rate=0.02
+    )
+    
+    # Verify efficient frontier results
+    assert 'efficient_frontier' in ef_results
+    assert 'max_sharpe_portfolio' in ef_results
+    assert 'min_volatility_portfolio' in ef_results
     
     # Print results
-    print("Optimized Portfolio Weights:")
-    for asset, weight in zip(assets, result['weights']):
+    print("Efficient Frontier Results:")
+    print(f"Max Sharpe Ratio Portfolio:")
+    for asset, weight in zip(assets, ef_results['max_sharpe_portfolio']['weights']):
         print(f"{asset}: {weight:.4f}")
     
-    print("\nPortfolio Metrics:")
-    for metric, value in result['metrics'].items():
-        print(f"{metric}: {value:.4f}")
+    print("\nMin Volatility Portfolio:")
+    for asset, weight in zip(assets, ef_results['min_volatility_portfolio']['weights']):
+        print(f"{asset}: {weight:.4f}")
     
-    # Generate efficient frontier
-    ef_data = optimizer.generate_efficient_frontier(price_data, num_portfolios=500)
-    
-    # Plot efficient frontier
-    optimizer.plot_efficient_frontier(ef_data, save_path='efficient_frontier.png')
-    
-    # Backtest portfolio
-    backtest_results = optimizer.backtest_portfolio(price_data, result['weights'])
-    
-    # Plot backtest results
-    optimizer.plot_backtest_results(backtest_results, save_path='backtest_results.png')
-    
-    print("\nBacktest Metrics:")
-    for metric, value in backtest_results['metrics'].items():
-        if isinstance(value, float):
-            print(f"{metric}: {value:.4f}")
+    # Test that weights sum to 1
+    assert np.isclose(np.sum(ef_results['max_sharpe_portfolio']['weights']), 1.0)
+    assert np.isclose(np.sum(ef_results['min_volatility_portfolio']['weights']), 1.0)
 
 if __name__ == "__main__":
     test_portfolio_optimizer()

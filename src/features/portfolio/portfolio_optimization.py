@@ -15,13 +15,20 @@ import os
 from datetime import datetime
 import matplotlib.pyplot as plt
 import seaborn as sns
+import time
+import warnings
+import requests
+import json
+import hashlib
+import pickle
 
-from stocker.cloud.portfolio_config import PortfolioConfig
+# Update import to use relative path
+from .portfolio_config import PortfolioConfig
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# --- RL Optimizer Dependencies (Added from portfolio/rl_optimizer.py) ---
+# --- RL Optimizer Dependencies ---
 try:
     import gym
     from gym import spaces
@@ -30,6 +37,14 @@ try:
 except ImportError:
     logger.warning("RL dependencies not found. RL optimization will not be available.")
     HAS_RL_DEPS = False
+
+# --- AWS Dependencies ---
+try:
+    import boto3
+    HAS_AWS_DEPS = True
+except ImportError:
+    logger.warning("AWS dependencies not found. Cloud optimization will not be available.")
+    HAS_AWS_DEPS = False
 
 class PerformanceOptimizer:
     """
@@ -58,10 +73,16 @@ class PerformanceOptimizer:
         Returns:
             Covariance matrix
         """
-        # Convert string key back to returns dataframe
-        # This is a simplified example - in practice, you'd use a more robust approach
-        returns = pd.read_json(returns_key)
-        return returns.cov().values
+        try:
+            # Convert string key back to returns dataframe
+            # This is a simplified example - in practice, you'd use a more robust approach
+            returns = pd.read_json(returns_key)
+            return returns.cov().values
+        except Exception as e:
+            logger.error(f"Error computing covariance matrix: {str(e)}")
+            # Return identity matrix as fallback
+            size = len(pd.read_json(returns_key).columns)
+            return np.eye(size)
     
     def parallel_monte_carlo(self, 
                            returns: pd.DataFrame,
@@ -82,21 +103,76 @@ class PerformanceOptimizer:
         Returns:
             Array of simulation results
         """
-        # Calculate mean and covariance
+        try:
+            # Calculate mean and covariance
+            mean_returns = returns.mean().values
+            cov_matrix = returns.cov().values
+            
+            # Determine optimal chunk size
+            chunk_size = max(1, num_simulations // (self.num_cores * 2))
+            chunks = [(mean_returns, cov_matrix, weights, initial_investment, 
+                      simulation_length, chunk_size) for _ in range(0, num_simulations, chunk_size)]
+            
+            # Run simulations in parallel
+            with ProcessPoolExecutor(max_workers=self.num_cores) as executor:
+                results = list(executor.map(self._run_simulation_chunk, chunks))
+            
+            # Combine results
+            return np.vstack(results)
+        except Exception as e:
+            logger.error(f"Error in parallel Monte Carlo simulation: {str(e)}")
+            # Fallback to simple simulation
+            return self._fallback_monte_carlo(
+                returns, weights, initial_investment, simulation_length, min(100, num_simulations)
+            )
+    
+    def _fallback_monte_carlo(self, 
+                            returns: pd.DataFrame,
+                            weights: np.ndarray,
+                            initial_investment: float,
+                            simulation_length: int,
+                            num_simulations: int) -> np.ndarray:
+        """
+        Fallback method for Monte Carlo simulation when parallel execution fails
+        
+        Args:
+            returns: DataFrame of asset returns
+            weights: Array of portfolio weights
+            initial_investment: Initial investment amount
+            simulation_length: Length of simulation in days
+            num_simulations: Number of simulations to run
+            
+        Returns:
+            Array of simulation results
+        """
+        logger.warning("Using fallback Monte Carlo simulation method")
+        
+        # Calculate mean and standard deviation of returns
         mean_returns = returns.mean().values
-        cov_matrix = returns.cov().values
+        std_returns = returns.std().values
         
-        # Determine optimal chunk size
-        chunk_size = max(1, num_simulations // (self.num_cores * 2))
-        chunks = [(mean_returns, cov_matrix, weights, initial_investment, 
-                  simulation_length, chunk_size) for _ in range(0, num_simulations, chunk_size)]
+        # Initialize results array
+        results = np.zeros((simulation_length, num_simulations))
         
-        # Run simulations in parallel
-        with ProcessPoolExecutor(max_workers=self.num_cores) as executor:
-            results = list(executor.map(self._run_simulation_chunk, chunks))
+        # Run simulations
+        for i in range(num_simulations):
+            # Generate random returns
+            random_returns = np.random.normal(
+                mean_returns.reshape(-1, 1), 
+                std_returns.reshape(-1, 1), 
+                size=(len(mean_returns), simulation_length)
+            )
+            
+            # Calculate portfolio returns
+            portfolio_returns = np.sum(random_returns * weights.reshape(-1, 1), axis=0)
+            
+            # Calculate cumulative returns
+            cumulative_returns = np.cumprod(1 + portfolio_returns)
+            
+            # Calculate portfolio values
+            results[:, i] = initial_investment * cumulative_returns
         
-        # Combine results
-        return np.vstack(results)
+        return results
     
     def _run_simulation_chunk(self, args: Tuple) -> np.ndarray:
         """
@@ -109,24 +185,51 @@ class PerformanceOptimizer:
         Returns:
             Array of simulation results for this chunk
         """
-        mean_returns, cov_matrix, weights, initial_investment, simulation_length, chunk_size = args
-        
-        # Generate random returns
-        np.random.seed()  # Use different seed for each process
-        Z = np.random.normal(size=(simulation_length, chunk_size, len(weights)))
-        L = np.linalg.cholesky(cov_matrix)
-        daily_returns = mean_returns.reshape(-1, 1) + np.tensordot(L, Z, axes=([1], [2])).T
-        
-        # Calculate portfolio returns
-        portfolio_returns = np.sum(daily_returns * weights.reshape(-1, 1, 1), axis=0).T
-        
-        # Calculate cumulative returns
-        cumulative_returns = np.cumprod(1 + portfolio_returns, axis=0)
-        
-        # Calculate portfolio values
-        portfolio_values = initial_investment * cumulative_returns
-        
-        return portfolio_values
+        try:
+            mean_returns, cov_matrix, weights, initial_investment, simulation_length, chunk_size = args
+            
+            # Generate random returns
+            np.random.seed()  # Use different seed for each process
+            Z = np.random.normal(size=(simulation_length, chunk_size, len(weights)))
+            L = np.linalg.cholesky(cov_matrix)
+            daily_returns = mean_returns.reshape(-1, 1) + np.tensordot(L, Z, axes=([1], [2])).T
+            
+            # Calculate portfolio returns
+            portfolio_returns = np.sum(daily_returns * weights.reshape(-1, 1, 1), axis=0).T
+            
+            # Calculate cumulative returns
+            cumulative_returns = np.cumprod(1 + portfolio_returns, axis=0)
+            
+            # Calculate portfolio values
+            portfolio_values = initial_investment * cumulative_returns
+            
+            return portfolio_values
+        except np.linalg.LinAlgError:
+            # Handle case where covariance matrix is not positive definite
+            logger.warning("Covariance matrix is not positive definite. Using diagonal approximation.")
+            
+            # Use diagonal approximation
+            diag_cov = np.diag(np.diag(cov_matrix))
+            L = np.linalg.cholesky(diag_cov)
+            
+            # Generate random returns
+            Z = np.random.normal(size=(simulation_length, chunk_size, len(weights)))
+            daily_returns = mean_returns.reshape(-1, 1) + np.tensordot(L, Z, axes=([1], [2])).T
+            
+            # Calculate portfolio returns
+            portfolio_returns = np.sum(daily_returns * weights.reshape(-1, 1, 1), axis=0).T
+            
+            # Calculate cumulative returns
+            cumulative_returns = np.cumprod(1 + portfolio_returns, axis=0)
+            
+            # Calculate portfolio values
+            portfolio_values = initial_investment * cumulative_returns
+            
+            return portfolio_values
+        except Exception as e:
+            logger.error(f"Error in simulation chunk: {str(e)}")
+            # Return zeros as fallback
+            return np.zeros((simulation_length, chunk_size))
     
     def parallel_efficient_frontier(self,
                                   returns: pd.DataFrame,
@@ -143,22 +246,94 @@ class PerformanceOptimizer:
         Returns:
             Dictionary with efficient frontier results
         """
+        try:
+            num_assets = len(returns.columns)
+            
+            # Split the work into chunks
+            chunk_size = max(100, num_portfolios // (self.num_cores * 2))
+            chunks = [(returns, num_assets, chunk_size, risk_free_rate, i) 
+                     for i in range(0, num_portfolios, chunk_size)]
+            
+            # Run in parallel
+            with ProcessPoolExecutor(max_workers=self.num_cores) as executor:
+                results = list(executor.map(self._calculate_portfolios_chunk, chunks))
+            
+            # Combine results
+            all_weights = np.vstack([r[0] for r in results])
+            all_returns = np.concatenate([r[1] for r in results])
+            all_volatilities = np.concatenate([r[2] for r in results])
+            all_sharpe_ratios = np.concatenate([r[3] for r in results])
+            
+            # Find optimal portfolios
+            max_sharpe_idx = np.argmax(all_sharpe_ratios)
+            min_vol_idx = np.argmin(all_volatilities)
+            
+            return {
+                'efficient_frontier': {
+                    'returns': all_returns,
+                    'volatilities': all_volatilities,
+                    'sharpe_ratios': all_sharpe_ratios,
+                    'weights': all_weights
+                },
+                'max_sharpe_portfolio': {
+                    'return': all_returns[max_sharpe_idx],
+                    'volatility': all_volatilities[max_sharpe_idx],
+                    'sharpe_ratio': all_sharpe_ratios[max_sharpe_idx],
+                    'weights': all_weights[max_sharpe_idx]
+                },
+                'min_volatility_portfolio': {
+                    'return': all_returns[min_vol_idx],
+                    'volatility': all_volatilities[min_vol_idx],
+                    'sharpe_ratio': all_sharpe_ratios[min_vol_idx],
+                    'weights': all_weights[min_vol_idx]
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error calculating efficient frontier: {str(e)}")
+            # Fallback to simplified calculation
+            return self._fallback_efficient_frontier(returns, min(500, num_portfolios), risk_free_rate)
+    
+    def _fallback_efficient_frontier(self,
+                                   returns: pd.DataFrame,
+                                   num_portfolios: int = 500,
+                                   risk_free_rate: float = 0.02) -> Dict[str, Any]:
+        """
+        Fallback method for efficient frontier calculation
+        
+        Args:
+            returns: DataFrame of asset returns
+            num_portfolios: Number of portfolios to simulate
+            risk_free_rate: Risk-free rate
+            
+        Returns:
+            Dictionary with efficient frontier results
+        """
+        logger.warning("Using fallback efficient frontier calculation")
+        
         num_assets = len(returns.columns)
+        mean_returns = returns.mean() * 252
+        cov_matrix = returns.cov() * 252
         
-        # Split the work into chunks
-        chunk_size = max(100, num_portfolios // (self.num_cores * 2))
-        chunks = [(returns, num_assets, chunk_size, risk_free_rate, i) 
-                 for i in range(0, num_portfolios, chunk_size)]
+        # Generate random portfolios
+        all_weights = np.zeros((num_portfolios, num_assets))
+        all_returns = np.zeros(num_portfolios)
+        all_volatilities = np.zeros(num_portfolios)
+        all_sharpe_ratios = np.zeros(num_portfolios)
         
-        # Run in parallel
-        with ProcessPoolExecutor(max_workers=self.num_cores) as executor:
-            results = list(executor.map(self._calculate_portfolios_chunk, chunks))
-        
-        # Combine results
-        all_weights = np.vstack([r[0] for r in results])
-        all_returns = np.concatenate([r[1] for r in results])
-        all_volatilities = np.concatenate([r[2] for r in results])
-        all_sharpe_ratios = np.concatenate([r[3] for r in results])
+        for i in range(num_portfolios):
+            # Generate random weights
+            weights = np.random.random(num_assets)
+            weights = weights / np.sum(weights)
+            all_weights[i, :] = weights
+            
+            # Calculate portfolio return and volatility
+            portfolio_return = np.sum(mean_returns * weights)
+            portfolio_volatility = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+            
+            # Store results
+            all_returns[i] = portfolio_return
+            all_volatilities[i] = portfolio_volatility
+            all_sharpe_ratios[i] = (portfolio_return - risk_free_rate) / portfolio_volatility
         
         # Find optimal portfolios
         max_sharpe_idx = np.argmax(all_sharpe_ratios)
@@ -166,29 +341,23 @@ class PerformanceOptimizer:
         
         return {
             'efficient_frontier': {
-                'weights': all_weights,
                 'returns': all_returns,
                 'volatilities': all_volatilities,
-                'sharpe_ratios': all_sharpe_ratios
+                'sharpe_ratios': all_sharpe_ratios,
+                'weights': all_weights
             },
-            'max_sharpe': {
-                'weights': all_weights[max_sharpe_idx],
-                'metrics': {
-                    'expected_return': all_returns[max_sharpe_idx],
-                    'volatility': all_volatilities[max_sharpe_idx],
-                    'sharpe_ratio': all_sharpe_ratios[max_sharpe_idx]
-                }
+            'max_sharpe_portfolio': {
+                'return': all_returns[max_sharpe_idx],
+                'volatility': all_volatilities[max_sharpe_idx],
+                'sharpe_ratio': all_sharpe_ratios[max_sharpe_idx],
+                'weights': all_weights[max_sharpe_idx]
             },
-            'min_volatility': {
-                'weights': all_weights[min_vol_idx],
-                'metrics': {
-                    'expected_return': all_returns[min_vol_idx],
-                    'volatility': all_volatilities[min_vol_idx],
-                    'sharpe_ratio': all_sharpe_ratios[min_vol_idx]
-                }
-            },
-            'assets': list(returns.columns),
-            'risk_free_rate': risk_free_rate
+            'min_volatility_portfolio': {
+                'return': all_returns[min_vol_idx],
+                'volatility': all_volatilities[min_vol_idx],
+                'sharpe_ratio': all_sharpe_ratios[min_vol_idx],
+                'weights': all_weights[min_vol_idx]
+            }
         }
     
     def _calculate_portfolios_chunk(self, args: Tuple) -> Tuple:
@@ -201,25 +370,104 @@ class PerformanceOptimizer:
         Returns:
             Tuple of (weights, returns, volatilities, sharpe_ratios)
         """
-        returns, num_assets, chunk_size, risk_free_rate, chunk_id = args
+        try:
+            returns_df, num_assets, chunk_size, risk_free_rate, chunk_id = args
+            
+            # Calculate mean returns and covariance matrix
+            mean_returns = returns_df.mean() * 252
+            cov_matrix = returns_df.cov() * 252
+            
+            # Initialize arrays
+            weights = np.zeros((chunk_size, num_assets))
+            portfolio_returns = np.zeros(chunk_size)
+            portfolio_volatilities = np.zeros(chunk_size)
+            portfolio_sharpe_ratios = np.zeros(chunk_size)
+            
+            # Set random seed based on chunk_id for reproducibility
+            np.random.seed(42 + chunk_id)
+            
+            # Generate random portfolios
+            for i in range(chunk_size):
+                # Generate random weights
+                w = np.random.random(num_assets)
+                w = w / np.sum(w)
+                weights[i, :] = w
+                
+                # Calculate portfolio return and volatility
+                portfolio_return = np.sum(mean_returns * w)
+                portfolio_volatility = np.sqrt(np.dot(w.T, np.dot(cov_matrix, w)))
+                
+                # Store results
+                portfolio_returns[i] = portfolio_return
+                portfolio_volatilities[i] = portfolio_volatility
+                portfolio_sharpe_ratios[i] = (portfolio_return - risk_free_rate) / portfolio_volatility
+            
+            return weights, portfolio_returns, portfolio_volatilities, portfolio_sharpe_ratios
+        except Exception as e:
+            logger.error(f"Error in portfolio calculation chunk: {str(e)}")
+            # Return empty arrays as fallback
+            return (
+                np.zeros((chunk_size, num_assets)),
+                np.zeros(chunk_size),
+                np.zeros(chunk_size),
+                np.zeros(chunk_size)
+            )
+    
+    def plot_efficient_frontier(self,
+                              ef_data: Dict[str, Any],
+                              save_path: Optional[str] = None) -> plt.Figure:
+        """
+        Plot efficient frontier
         
-        # Set different seed for each chunk
-        np.random.seed(chunk_id)
-        
-        # Calculate mean returns and covariance matrix
-        mean_returns = returns.mean().values
-        cov_matrix = returns.cov().values
-        
-        # Generate random weights
-        weights = np.random.random((chunk_size, num_assets))
-        weights = weights / np.sum(weights, axis=1)[:, np.newaxis]
-        
-        # Calculate portfolio metrics
-        portfolio_returns = np.dot(weights, mean_returns) * 252
-        portfolio_volatilities = np.sqrt(np.einsum('ij,jk,ik->i', weights, cov_matrix, weights)) * np.sqrt(252)
-        sharpe_ratios = (portfolio_returns - risk_free_rate) / portfolio_volatilities
-        
-        return weights, portfolio_returns, portfolio_volatilities, sharpe_ratios
+        Args:
+            ef_data: Efficient frontier data from parallel_efficient_frontier
+            save_path: Optional path to save the figure
+            
+        Returns:
+            Matplotlib figure
+        """
+        try:
+            # Extract data
+            returns = ef_data['efficient_frontier']['returns']
+            volatilities = ef_data['efficient_frontier']['volatilities']
+            sharpe_ratios = ef_data['efficient_frontier']['sharpe_ratios']
+            
+            max_sharpe_return = ef_data['max_sharpe_portfolio']['return']
+            max_sharpe_volatility = ef_data['max_sharpe_portfolio']['volatility']
+            
+            min_vol_return = ef_data['min_volatility_portfolio']['return']
+            min_vol_volatility = ef_data['min_volatility_portfolio']['volatility']
+            
+            # Create figure
+            fig, ax = plt.subplots(figsize=(10, 6))
+            
+            # Plot efficient frontier
+            scatter = ax.scatter(volatilities, returns, c=sharpe_ratios, cmap='viridis', alpha=0.5)
+            
+            # Plot optimal portfolios
+            ax.scatter(max_sharpe_volatility, max_sharpe_return, marker='*', color='r', s=200, label='Max Sharpe')
+            ax.scatter(min_vol_volatility, min_vol_return, marker='*', color='g', s=200, label='Min Volatility')
+            
+            # Add colorbar
+            cbar = plt.colorbar(scatter)
+            cbar.set_label('Sharpe Ratio')
+            
+            # Set labels and title
+            ax.set_xlabel('Volatility (Standard Deviation)')
+            ax.set_ylabel('Expected Return')
+            ax.set_title('Efficient Frontier')
+            ax.legend()
+            ax.grid(True)
+            
+            # Save figure if path provided
+            if save_path:
+                plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            
+            return fig
+        except Exception as e:
+            logger.error(f"Error plotting efficient frontier: {str(e)}")
+            # Return empty figure as fallback
+            return plt.figure()
 
 
 class MonteCarloSimulator:
@@ -279,529 +527,477 @@ class MonteCarloSimulator:
         
         # Calculate portfolio volatility
         portfolio_volatility = np.sqrt(
-            np.dot(self.weights.T, np.dot(self.cov_matrix, self.weights))
-        ) * np.sqrt(self.trading_days)
+            np.dot(self.weights.T, np.dot(self.cov_matrix * self.trading_days, self.weights))
+        )
         
         # Calculate Sharpe ratio
         sharpe_ratio = (portfolio_return - self.risk_free_rate) / portfolio_volatility
         
         return {
-            "expected_return": float(portfolio_return),
-            "volatility": float(portfolio_volatility),
-            "sharpe_ratio": float(sharpe_ratio)
+            'expected_return': portfolio_return,
+            'volatility': portfolio_volatility,
+            'sharpe_ratio': sharpe_ratio
         }
     
     def run_simulation(self) -> Dict[str, Any]:
         """
-        Run Monte Carlo simulation for the portfolio
+        Run Monte Carlo simulation
         
         Returns:
             Dictionary with simulation results
         """
-        # Calculate time steps
-        total_steps = self.simulation_years * self.trading_days
+        # Calculate portfolio metrics
+        metrics = self._calculate_portfolio_metrics()
         
-        # Initialize array for simulation results
-        simulation_results = np.zeros((self.num_simulations, total_steps + 1))
-        simulation_results[:, 0] = 1  # Start with $1
+        # Calculate simulation parameters
+        simulation_length = self.simulation_years * self.trading_days
         
-        # Generate random returns using multivariate normal distribution
-        for sim in range(self.num_simulations):
-            # Generate random returns
-            Z = np.random.multivariate_normal(
-                self.mean_returns, 
-                self.cov_matrix, 
-                total_steps
-            )
-            
-            # Calculate portfolio returns
-            portfolio_returns = np.sum(Z * self.weights, axis=1)
-            
-            # Calculate cumulative returns
-            for step in range(total_steps):
-                simulation_results[sim, step + 1] = simulation_results[sim, step] * (1 + portfolio_returns[step])
+        # Generate random returns
+        np.random.seed(42)  # For reproducibility
+        Z = np.random.normal(size=(simulation_length, self.num_simulations, self.num_assets))
+        L = np.linalg.cholesky(self.cov_matrix)
+        daily_returns = self.mean_returns.reshape(-1, 1) + np.tensordot(L, Z, axes=([1], [2])).T
         
-        self.simulation_results = simulation_results
+        # Calculate portfolio returns
+        portfolio_returns = np.sum(daily_returns * self.weights.reshape(-1, 1, 1), axis=0).T
         
-        # Calculate statistics
-        final_values = simulation_results[:, -1]
+        # Calculate cumulative returns
+        cumulative_returns = np.cumprod(1 + portfolio_returns, axis=0)
         
         # Calculate percentiles
-        percentiles = {
-            "worst_case": float(np.percentile(final_values, 5)),
-            "best_case": float(np.percentile(final_values, 95)),
-            "median_case": float(np.percentile(final_values, 50)),
-            "mean_final_value": float(np.mean(final_values))
+        percentiles = [0.05, 0.25, 0.5, 0.75, 0.95]
+        final_percentiles = np.percentile(cumulative_returns[-1, :], [p * 100 for p in percentiles])
+        
+        # Store results
+        self.simulation_results = {
+            'cumulative_returns': cumulative_returns,
+            'metrics': metrics,
+            'final_percentiles': {f'p{int(p*100)}': val for p, val in zip(percentiles, final_percentiles)},
+            'simulation_parameters': {
+                'simulation_years': self.simulation_years,
+                'trading_days': self.trading_days,
+                'num_simulations': self.num_simulations
+            }
         }
         
-        # Calculate probability of loss
-        prob_loss = np.mean(final_values < 1.0)
-        
-        # Calculate expected shortfall (CVaR) at 5%
-        cvar_5 = np.mean(final_values[final_values <= np.percentile(final_values, 5)])
-        
-        # Calculate maximum drawdown across all simulations
-        max_drawdowns = []
-        for sim in range(self.num_simulations):
-            cumulative_returns = simulation_results[sim, :]
-            peak = np.maximum.accumulate(cumulative_returns)
-            drawdown = (peak - cumulative_returns) / peak
-            max_drawdowns.append(np.max(drawdown))
-        
-        avg_max_drawdown = np.mean(max_drawdowns)
-        
-        # Portfolio metrics
-        portfolio_metrics = self._calculate_portfolio_metrics()
-        
-        return {
-            "portfolio_metrics": portfolio_metrics,
-            "simulation_statistics": {
-                "percentiles": percentiles,
-                "probability_of_loss": float(prob_loss),
-                "expected_shortfall_5": float(cvar_5),
-                "avg_max_drawdown": float(avg_max_drawdown)
-            },
-            "simulation_years": self.simulation_years,
-            "num_simulations": self.num_simulations
-        }
+        return self.simulation_results
     
-    def plot_simulations(self, 
-                         num_paths_to_plot: int = 100, 
-                         figsize: Tuple[int, int] = (12, 8),
-                         title: str = "Monte Carlo Simulation of Portfolio Performance",
-                         save_path: Optional[str] = None) -> None:
+    def plot_simulation_results(self, 
+                              num_paths: int = 100,
+                              figsize: Tuple[int, int] = (12, 8),
+                              initial_investment: float = 10000.0) -> plt.Figure:
         """
-        Plot the Monte Carlo simulation results
+        Plot simulation results
         
         Args:
-            num_paths_to_plot: Number of random paths to plot
+            num_paths: Number of paths to plot
             figsize: Figure size
-            title: Plot title
-            save_path: Path to save the figure (if None, the figure will be displayed)
-        """
-        if self.simulation_results is None:
-            raise ValueError("No simulation results available. Run run_simulation() first.")
-        
-        plt.figure(figsize=figsize)
-        
-        # Plot a subset of simulation paths
-        indices = np.random.choice(self.num_simulations, min(num_paths_to_plot, self.num_simulations), replace=False)
-        for idx in indices:
-            plt.plot(self.simulation_results[idx], 'b-', alpha=0.1)
-        
-        # Plot percentiles
-        for percentile in [5, 50, 95]:
-            percentile_values = np.percentile(self.simulation_results, percentile, axis=0)
-            plt.plot(percentile_values, 'r-', linewidth=2, label=f"{percentile}th Percentile")
-        
-        plt.title(title)
-        plt.xlabel("Trading Days")
-        plt.ylabel("Portfolio Value (Starting at $1)")
-        plt.legend()
-        plt.grid(True)
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        else:
-            plt.show()
-    
-    def plot_distribution(self,
-                          figsize: Tuple[int, int] = (12, 8),
-                          title: str = "Distribution of Final Portfolio Values",
-                          save_path: Optional[str] = None) -> None:
-        """
-        Plot the distribution of final portfolio values
-        
-        Args:
-            figsize: Figure size
-            title: Plot title
-            save_path: Path to save the figure (if None, the figure will be displayed)
-        """
-        if self.simulation_results is None:
-            raise ValueError("No simulation results available. Run run_simulation() first.")
-        
-        final_values = self.simulation_results[:, -1]
-        
-        plt.figure(figsize=figsize)
-        
-        # Plot histogram
-        sns.histplot(final_values, kde=True)
-        
-        # Add vertical lines for percentiles
-        for percentile, color, label in zip([5, 50, 95], ['r', 'g', 'b'], 
-                                           ['5th Percentile', 'Median', '95th Percentile']):
-            value = np.percentile(final_values, percentile)
-            plt.axvline(x=value, color=color, linestyle='--', label=f"{label}: ${value:.2f}")
-        
-        # Add initial investment line
-        plt.axvline(x=1.0, color='k', linestyle='-', label="Initial Investment: $1.00")
-        
-        plt.title(title)
-        plt.xlabel("Final Portfolio Value")
-        plt.ylabel("Frequency")
-        plt.legend()
-        plt.grid(True)
-        
-        if save_path:
-            plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        else:
-            plt.show()
-
-    def get_extreme_scenarios(self, confidence_level: float = 0.05) -> Dict[str, Any]:
-        """
-        Get best and worst case scenarios with given confidence level
+            initial_investment: Initial investment amount
+            
+        Returns:
+            Matplotlib figure
         """
         if self.simulation_results is None:
             self.run_simulation()
+            
+        cumulative_returns = self.simulation_results['cumulative_returns']
         
-        final_values = self.simulation_results[:, -1]
+        # Create figure
+        fig, ax = plt.subplots(figsize=figsize)
+        
+        # Plot a subset of paths
+        indices = np.random.choice(cumulative_returns.shape[1], min(num_paths, cumulative_returns.shape[1]), replace=False)
+        for i in indices:
+            ax.plot(cumulative_returns[:, i] * initial_investment, 'b-', alpha=0.1)
+            
+        # Plot percentiles
+        percentiles = [0.05, 0.5, 0.95]
+        percentile_values = np.percentile(cumulative_returns, [p * 100 for p in percentiles], axis=1)
+        
+        for i, p in enumerate(percentiles):
+            ax.plot(percentile_values[i] * initial_investment, 'r-', linewidth=2, 
+                   label=f'{int(p*100)}th Percentile')
+            
+        # Add labels and title
+        ax.set_xlabel('Trading Days')
+        ax.set_ylabel(f'Portfolio Value (Initial: ${initial_investment:,.0f})')
+        ax.set_title('Monte Carlo Simulation of Portfolio Value')
+        ax.legend()
+        ax.grid(True)
+        
+        return fig
+
+
+class ThunderComputePortfolioOptimizer:
+    """
+    Portfolio optimization using ThunderCompute cloud infrastructure
+    """
+    
+    def __init__(self, 
+                 api_key: Optional[str] = None,
+                 s3_bucket: Optional[str] = None,
+                 aws_access_key_id: Optional[str] = None,
+                 aws_secret_access_key: Optional[str] = None,
+                 aws_region: str = 'eu-north-1'):
+        """
+        Initialize the ThunderCompute portfolio optimizer
+        
+        Args:
+            api_key: ThunderCompute API key (if None, load from env)
+            s3_bucket: S3 bucket name for data storage (if None, load from env)
+            aws_access_key_id: AWS access key ID (if None, load from env)
+            aws_secret_access_key: AWS secret access key (if None, load from env)
+            aws_region: AWS region
+        """
+        # Issue deprecation warning
+        warnings.warn(
+            "This class is now part of portfolio_optimization.py. Import it directly from there.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        
+        # Load credentials from environment variables if not provided
+        self.api_key = api_key or os.environ.get('THUNDERCOMPUTE_API_KEY')
+        self.s3_bucket = s3_bucket or os.environ.get('S3_BUCKET_NAME')
+        self.aws_access_key_id = aws_access_key_id or os.environ.get('AWS_ACCESS_KEY_ID')
+        self.aws_secret_access_key = aws_secret_access_key or os.environ.get('AWS_SECRET_ACCESS_KEY')
+        self.aws_region = aws_region or os.environ.get('AWS_REGION', 'eu-north-1')
+        
+        # Validate credentials
+        if not self.api_key:
+            raise ValueError("Missing ThunderCompute API key. Please provide it as a parameter or set THUNDERCOMPUTE_API_KEY environment variable.")
+        if not self.s3_bucket:
+            raise ValueError("Missing S3 bucket name. Please provide it as a parameter or set S3_BUCKET_NAME environment variable.")
+        if not self.aws_access_key_id:
+            raise ValueError("Missing AWS access key ID. Please provide it as a parameter or set AWS_ACCESS_KEY_ID environment variable.")
+        if not self.aws_secret_access_key:
+            raise ValueError("Missing AWS secret access key. Please provide it as a parameter or set AWS_SECRET_ACCESS_KEY environment variable.")
+        
+        # Initialize S3 client if AWS dependencies are available
+        if HAS_AWS_DEPS:
+            self.s3_client = boto3.client(
+                's3',
+                aws_access_key_id=self.aws_access_key_id,
+                aws_secret_access_key=self.aws_secret_access_key,
+                region_name=self.aws_region
+            )
+        else:
+            logger.warning("AWS dependencies not found. Cloud optimization will not be available.")
+            self.s3_client = None
+        
+        # ThunderCompute API base URL
+        self.api_base_url = "https://api.thundercompute.com/v1"
+        
+        # Headers for API requests
+        self.headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+    
+    def _upload_data_to_s3(self, 
+                          data: pd.DataFrame, 
+                          file_name: str) -> str:
+        """
+        Upload data to S3 bucket
+        
+        Args:
+            data: DataFrame to upload
+            file_name: Name of the file in S3
+            
+        Returns:
+            S3 URI of the uploaded file
+        """
+        if not HAS_AWS_DEPS:
+            raise ImportError("AWS dependencies not found. Cannot upload data to S3.")
+            
+        # Convert DataFrame to CSV
+        csv_buffer = data.to_csv(index=True).encode()
+        
+        # Upload to S3
+        self.s3_client.put_object(
+            Bucket=self.s3_bucket,
+            Key=file_name,
+            Body=csv_buffer
+        )
+        
+        # Return S3 URI
+        return f"s3://{self.s3_bucket}/{file_name}"
+    
+    def _download_data_from_s3(self, 
+                              file_name: str) -> pd.DataFrame:
+        """
+        Download data from S3 bucket
+        
+        Args:
+            file_name: Name of the file in S3
+            
+        Returns:
+            Downloaded DataFrame
+        """
+        if not HAS_AWS_DEPS:
+            raise ImportError("AWS dependencies not found. Cannot download data from S3.")
+            
+        # Download from S3
+        response = self.s3_client.get_object(
+            Bucket=self.s3_bucket,
+            Key=file_name
+        )
+        
+        # Convert to DataFrame
+        return pd.read_csv(response['Body'])
+    
+    def _submit_job(self, 
+                   job_config: Dict[str, Any]) -> str:
+        """
+        Submit a job to ThunderCompute
+        
+        Args:
+            job_config: Job configuration
+            
+        Returns:
+            Job ID
+        """
+        # Submit job
+        response = requests.post(
+            f"{self.api_base_url}/jobs",
+            headers=self.headers,
+            json=job_config
+        )
+        
+        # Check response
+        if response.status_code == 200:
+            return response.json().get('job_id', '')
+        else:
+            raise Exception(f"Failed to submit job: {response.text}")
+    
+    def _get_job_status(self, job_id: str) -> Dict[str, Any]:
+        """
+        Get job status from ThunderCompute
+        
+        Args:
+            job_id: Job ID
+            
+        Returns:
+            Job status
+        """
+        # Get job status
+        response = requests.get(
+            f"{self.api_base_url}/jobs/{job_id}",
+            headers=self.headers
+        )
+        
+        # Check response
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(f"Failed to get job status: {response.text}")
+    
+    def calculate_portfolio_metrics(self, 
+                                  returns: pd.DataFrame, 
+                                  weights: np.ndarray) -> Dict[str, float]:
+        """
+        Calculate portfolio metrics (return, volatility, Sharpe ratio)
+        
+        Args:
+            returns: DataFrame of asset returns
+            weights: Array of asset weights
+            
+        Returns:
+            Dictionary of portfolio metrics
+        """
+        # Calculate portfolio return
+        portfolio_return = np.sum(returns.mean() * weights) * 252
+        
+        # Calculate portfolio volatility
+        portfolio_volatility = np.sqrt(np.dot(weights.T, np.dot(returns.cov() * 252, weights)))
+        
+        # Calculate Sharpe ratio (assuming risk-free rate of 0.02)
+        sharpe_ratio = (portfolio_return - 0.02) / portfolio_volatility
         
         return {
-            "best_case": float(np.percentile(final_values, 100*(1-confidence_level))),
-            "worst_case": float(np.percentile(final_values, 100*confidence_level)),
-            "confidence_level": confidence_level
+            'return': portfolio_return,
+            'volatility': portfolio_volatility,
+            'sharpe_ratio': sharpe_ratio
         }
-
-class StockTradingEnv(gym.Env):
-    """Custom Environment for stock trading portfolio optimization"""
     
-    metadata = {'render.modes': ['human']}
-    
-    def __init__(self, 
-                 stock_data: pd.DataFrame, 
-                 initial_balance: float = 10000.0,
-                 transaction_cost_pct: float = 0.001,
-                 reward_scaling: float = 1e-4,
-                 window_size: int = 30):
+    def _negative_sharpe_ratio(self, 
+                             weights: np.ndarray, 
+                             returns: pd.DataFrame) -> float:
         """
-        Initialize the trading environment.
+        Calculate negative Sharpe ratio (for minimization)
         
         Args:
-            stock_data: DataFrame with stock price data (must include 'Close' column)
-            initial_balance: Starting portfolio value
-            transaction_cost_pct: Cost of transactions as percentage
-            reward_scaling: Scaling factor for rewards
-            window_size: Size of observation window
-        """
-        super(StockTradingEnv, self).__init__()
-        
-        self.stock_data = stock_data
-        self.stock_dim = len(stock_data.columns.levels[0]) if isinstance(stock_data.columns, pd.MultiIndex) else 1
-        self.initial_balance = initial_balance
-        self.transaction_cost_pct = transaction_cost_pct
-        self.reward_scaling = reward_scaling
-        self.window_size = window_size
-        self.terminal = False
-        
-        # Action space: portfolio weights for each stock (continuous from 0 to 1)
-        self.action_space = spaces.Box(
-            low=0, high=1, shape=(self.stock_dim,), dtype=np.float32
-        )
-        
-        # Observation space: includes price history, portfolio weights, balance
-        obs_dim = self.window_size * self.stock_dim + self.stock_dim + 1
-        self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
-        )
-        
-        # Initialize state
-        self.reset()
-    
-    def reset(self):
-        """Reset the environment to initial state."""
-        self.time_step = self.window_size
-        self.terminal = False
-        self.portfolio_value = self.initial_balance
-        self.portfolio_weights = np.zeros(self.stock_dim)
-        self.portfolio_return = 0
-        self.cost = 0
-        self.trades = 0
-        self.episode_returns = []
-        
-        return self._get_observation()
-    
-    def step(self, action):
-        """
-        Execute one step in the environment.
-        
-        Args:
-            action: Portfolio weights for each asset
-        
+            weights: Array of asset weights
+            returns: DataFrame of asset returns
+            
         Returns:
-            observation, reward, done, info
+            Negative Sharpe ratio
         """
-        self.time_step += 1
+        portfolio_metrics = self.calculate_portfolio_metrics(returns, weights)
+        return -portfolio_metrics['sharpe_ratio']
+    
+    def optimize_portfolio(self, 
+                         price_data: pd.DataFrame, 
+                         risk_free_rate: float = 0.02,
+                         use_cloud: bool = False) -> Dict[str, Any]:
+        """
+        Optimize portfolio weights using Modern Portfolio Theory
         
-        # Normalize action to ensure weights sum to 1
-        action_sum = np.sum(action)
-        if action_sum > 0:
-            normalized_action = action / action_sum
+        Args:
+            price_data: DataFrame of asset prices
+            risk_free_rate: Risk-free rate
+            use_cloud: Whether to use cloud computing
+            
+        Returns:
+            Dictionary with optimized weights and metrics
+        """
+        # Calculate returns
+        returns = price_data.pct_change().dropna()
+        
+        # If using cloud computing, submit job to ThunderCompute
+        if use_cloud:
+            if not HAS_AWS_DEPS:
+                raise ImportError("AWS dependencies not found. Cannot use cloud optimization.")
+                
+            # Upload data to S3
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            s3_path = self._upload_data_to_s3(
+                price_data, 
+                f"portfolio_optimization/{timestamp}/price_data.csv"
+            )
+            
+            # Submit job
+            job_config = {
+                "job_type": "portfolio_optimization",
+                "data_path": s3_path,
+                "parameters": {
+                    "risk_free_rate": risk_free_rate
+                }
+            }
+            
+            job_id = self._submit_job(job_config)
+            
+            # Wait for job to complete
+            while True:
+                job_status = self._get_job_status(job_id)
+                if job_status['status'] == 'COMPLETED':
+                    # Download results
+                    result_path = job_status['result_path']
+                    result_file = result_path.split('/')[-1]
+                    results = self._download_data_from_s3(result_file)
+                    
+                    # Parse results
+                    weights = results['weights'].values
+                    metrics = {
+                        'return': results['return'].iloc[0],
+                        'volatility': results['volatility'].iloc[0],
+                        'sharpe_ratio': results['sharpe_ratio'].iloc[0]
+                    }
+                    
+                    return {
+                        'weights': weights,
+                        'metrics': metrics,
+                        'assets': price_data.columns.tolist()
+                    }
+                
+                elif job_status['status'] == 'FAILED':
+                    raise Exception(f"Job failed: {job_status.get('error', 'Unknown error')}")
+                
+                # Sleep for 5 seconds
+                time.sleep(5)
+        
+        # Otherwise, optimize locally
         else:
-            normalized_action = np.ones(self.stock_dim) / self.stock_dim
+            try:
+                from scipy.optimize import minimize
+                
+                num_assets = len(returns.columns)
+                
+                # Initial guess (equal weights)
+                initial_weights = np.array([1.0 / num_assets] * num_assets)
+                
+                # Constraints (weights sum to 1)
+                constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
+                
+                # Bounds (no short selling)
+                bounds = tuple((0, 1) for _ in range(num_assets))
+                
+                # Optimize
+                result = minimize(
+                    self._negative_sharpe_ratio,
+                    initial_weights,
+                    args=(returns,),
+                    method='SLSQP',
+                    bounds=bounds,
+                    constraints=constraints
+                )
+                
+                # Get optimized weights
+                weights = result['x']
+                
+                # Calculate metrics
+                metrics = self.calculate_portfolio_metrics(returns, weights)
+                
+                return {
+                    'weights': weights,
+                    'metrics': metrics,
+                    'assets': price_data.columns.tolist()
+                }
+            except ImportError:
+                raise ImportError("SciPy not found. Cannot perform local optimization.")
+    
+    def backtest_portfolio(self, 
+                         price_data: pd.DataFrame, 
+                         weights: np.ndarray, 
+                         start_date: Optional[str] = None, 
+                         end_date: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Backtest portfolio performance
         
-        # Get current prices and next prices
-        current_prices = self._get_prices(self.time_step - 1)
-        next_prices = self._get_prices(self.time_step)
+        Args:
+            price_data: DataFrame of asset prices
+            weights: Array of asset weights
+            start_date: Start date for backtest (if None, use first date in price_data)
+            end_date: End date for backtest (if None, use last date in price_data)
+            
+        Returns:
+            Dictionary with backtest results
+        """
+        # Filter data by date range
+        if start_date:
+            price_data = price_data[price_data.index >= start_date]
+        if end_date:
+            price_data = price_data[price_data.index <= end_date]
         
-        # Calculate transaction costs
-        prev_portfolio_value = self.portfolio_value
-        costs = self._calculate_transaction_costs(normalized_action)
+        # Calculate returns
+        returns = price_data.pct_change().dropna()
         
-        # Update portfolio value based on price changes and costs
-        price_change_pct = next_prices / current_prices - 1
-        portfolio_return = np.sum(normalized_action * price_change_pct)
-        self.portfolio_value = prev_portfolio_value * (1 + portfolio_return) - costs
+        # Calculate portfolio returns
+        portfolio_returns = returns.dot(weights)
         
-        # Calculate reward (Sharpe ratio or returns-based)
-        self.episode_returns.append(portfolio_return)
-        if len(self.episode_returns) > 1:
-            reward = self._calculate_reward()
-        else:
-            reward = 0
+        # Calculate cumulative returns
+        cumulative_returns = (1 + portfolio_returns).cumprod()
         
-        # Check if episode is done
-        done = self.time_step >= len(self.stock_data) - 1
+        # Calculate metrics
+        total_return = cumulative_returns.iloc[-1] - 1
+        annualized_return = (1 + total_return) ** (252 / len(returns)) - 1
+        annualized_volatility = portfolio_returns.std() * np.sqrt(252)
+        sharpe_ratio = annualized_return / annualized_volatility
         
-        # Update state
-        self.portfolio_weights = normalized_action
-        self.cost += costs
+        # Calculate drawdowns
+        wealth_index = (1 + portfolio_returns).cumprod()
+        previous_peaks = wealth_index.cummax()
+        drawdowns = (wealth_index - previous_peaks) / previous_peaks
+        max_drawdown = drawdowns.min()
         
-        # Get observation
-        observation = self._get_observation()
-        
-        info = {
-            'portfolio_value': self.portfolio_value,
-            'portfolio_return': portfolio_return,
-            'transaction_costs': costs,
-            'weights': normalized_action
+        return {
+            'portfolio_returns': portfolio_returns,
+            'cumulative_returns': cumulative_returns,
+            'metrics': {
+                'total_return': total_return,
+                'annualized_return': annualized_return,
+                'annualized_volatility': annualized_volatility,
+                'sharpe_ratio': sharpe_ratio,
+                'max_drawdown': max_drawdown
+            }
         }
-        
-        return observation, reward * self.reward_scaling, done, info
-    
-    def _get_prices(self, time_idx):
-        """Get stock prices at a specific time index."""
-        if isinstance(self.stock_data.columns, pd.MultiIndex):
-            return np.array([self.stock_data.iloc[time_idx][stock]['Close'] 
-                            for stock in self.stock_data.columns.levels[0]])
-        else:
-            return np.array([self.stock_data.iloc[time_idx]['Close']])
-    
-    def _get_observation(self):
-        """Construct the observation from current state."""
-        # Get price history for window_size
-        price_history = []
-        for i in range(self.time_step - self.window_size, self.time_step):
-            price_history.extend(self._get_prices(i) / self._get_prices(self.time_step - self.window_size))
-        
-        # Combine price history with portfolio weights and value
-        observation = np.concatenate((
-            price_history,
-            self.portfolio_weights,
-            [self.portfolio_value / self.initial_balance]  # Normalized portfolio value
-        ))
-        
-        return observation
-    
-    def _calculate_transaction_costs(self, new_weights):
-        """Calculate transaction costs for portfolio rebalancing."""
-        costs = self.transaction_cost_pct * np.sum(np.abs(new_weights - self.portfolio_weights)) * self.portfolio_value
-        return costs
-    
-    def _calculate_reward(self):
-        """Calculate reward based on recent returns."""
-        # Option 1: Simple return
-        # return self.episode_returns[-1]
-        
-        # Option 2: Sharpe ratio (if we have enough history)
-        if len(self.episode_returns) > 1:
-            returns = np.array(self.episode_returns[-20:])  # Use last 20 returns
-            sharpe = returns.mean() / (returns.std() + 1e-9) * np.sqrt(252)  # Annualized
-            return sharpe
-        else:
-            return 0
-    
-    def render(self, mode='human'):
-        """Render the environment."""
-        print(f"Time: {self.time_step}, Portfolio Value: {self.portfolio_value:.2f}")
-        print(f"Weights: {self.portfolio_weights}")
-        print(f"Return: {self.portfolio_return:.4f}, Cost: {self.cost:.4f}")
-
-class RLPortfolioOptimizer:
-    """Portfolio optimizer using Reinforcement Learning."""
-    
-    def __init__(self, 
-                 algorithm: str = 'ppo',
-                 policy: str = 'MlpPolicy',
-                 train_timesteps: int = 100000,
-                 model_dir: str = './models/rl'):
-        """
-        Initialize the RL portfolio optimizer.
-        
-        Args:
-            algorithm: RL algorithm to use ('ppo', 'a2c', or 'sac')
-            policy: Policy network architecture
-            train_timesteps: Number of timesteps to train for
-            model_dir: Directory to save trained models
-        """
-        if not HAS_RL_DEPS:
-            raise ImportError("RL dependencies not installed. Please install gym and stable-baselines3.")
-            
-        self.algorithm = algorithm
-        self.policy = policy
-        self.train_timesteps = train_timesteps
-        self.model_dir = model_dir
-        self.model = None
-        self.env = None
-        
-        # Create model directory if it doesn't exist
-        os.makedirs(model_dir, exist_ok=True)
-    
-    def create_env(self, stock_data: pd.DataFrame, **kwargs):
-        """Create the trading environment."""
-        self.env = StockTradingEnv(stock_data=stock_data, **kwargs)
-        return self.env
-    
-    def train(self, stock_data: pd.DataFrame = None, **kwargs):
-        """
-        Train the RL model for portfolio optimization.
-        
-        Args:
-            stock_data: Stock price data (if not provided, uses existing env)
-            **kwargs: Additional arguments for environment creation
-        
-        Returns:
-            Trained model
-        """
-        if stock_data is not None or self.env is None:
-            self.create_env(stock_data, **kwargs)
-        
-        # Initialize the appropriate algorithm
-        if self.algorithm.lower() == 'ppo':
-            self.model = PPO(self.policy, self.env, verbose=1)
-        elif self.algorithm.lower() == 'a2c':
-            self.model = A2C(self.policy, self.env, verbose=1)
-        elif self.algorithm.lower() == 'sac':
-            self.model = SAC(self.policy, self.env, verbose=1)
-        else:
-            raise ValueError(f"Unsupported algorithm: {self.algorithm}")
-        
-        # Train the model
-        self.model.learn(total_timesteps=self.train_timesteps)
-        
-        # Save the trained model
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        model_path = os.path.join(self.model_dir, f"{self.algorithm}_{timestamp}")
-        self.model.save(model_path)
-        
-        return self.model
-    
-    def optimize(self, stock_data: pd.DataFrame, test_days: int = 252, deterministic: bool = True):
-        """
-        Generate optimal portfolio weights using the trained model.
-        
-        Args:
-            stock_data: Stock price data for testing
-            test_days: Number of days to test
-            deterministic: Whether to use deterministic actions
-        
-        Returns:
-            DataFrame with portfolio weights, values, and returns
-        """
-        if self.model is None:
-            raise ValueError("Model must be trained before optimization")
-        
-        # Create test environment
-        test_env = StockTradingEnv(stock_data=stock_data)
-        
-        # Run the model
-        observation = test_env.reset()
-        done = False
-        results = []
-        
-        while not done:
-            action, _states = self.model.predict(observation, deterministic=deterministic)
-            observation, reward, done, info = test_env.step(action)
-            
-            results.append({
-                'timestamp': stock_data.index[test_env.time_step - 1],
-                'portfolio_value': info['portfolio_value'],
-                'portfolio_return': info['portfolio_return'],
-                'transaction_costs': info['transaction_costs'],
-                'weights': info['weights']
-            })
-        
-        # Convert results to DataFrame
-        results_df = pd.DataFrame(results)
-        results_df.set_index('timestamp', inplace=True)
-        
-        # Extract weights into separate columns
-        if isinstance(stock_data.columns, pd.MultiIndex):
-            stock_names = stock_data.columns.levels[0]
-        else:
-            stock_names = ['Stock']
-        
-        for i, stock in enumerate(stock_names):
-            results_df[f'weight_{stock}'] = results_df['weights'].apply(lambda x: x[i])
-        
-        # Drop the weights column (list of arrays)
-        results_df.drop('weights', axis=1, inplace=True)
-        
-        return results_df
-    
-    def load_model(self, model_path: str):
-        """Load a trained model from disk."""
-        if self.algorithm.lower() == 'ppo':
-            self.model = PPO.load(model_path)
-        elif self.algorithm.lower() == 'a2c':
-            self.model = A2C.load(model_path)
-        elif self.algorithm.lower() == 'sac':
-            self.model = SAC.load(model_path)
-        else:
-            raise ValueError(f"Unsupported algorithm: {self.algorithm}")
-        
-        return self.model
-    
-    def get_current_weights(self):
-        """Get the current portfolio weights."""
-        if self.env is None:
-            raise ValueError("Environment not created. Call create_env first.")
-        return self.env.portfolio_weights
-
-def train_rl_portfolio_optimizer(
-    stock_data: pd.DataFrame,
-    algorithm: str = 'ppo',
-    train_timesteps: int = 100000,
-    initial_balance: float = 10000.0,
-    transaction_cost_pct: float = 0.001,
-    window_size: int = 30,
-    model_dir: str = './models/rl'
-):
-    """
-    Train a reinforcement learning portfolio optimizer.
-    
-    Args:
-        stock_data: DataFrame with stock price data
-        algorithm: RL algorithm to use ('ppo', 'a2c', or 'sac')
-        train_timesteps: Number of timesteps to train for
-        initial_balance: Starting portfolio value
-        transaction_cost_pct: Cost of transactions as percentage
-        window_size: Size of observation window
-        model_dir: Directory to save trained models
-    
-    Returns:
-        Trained RLPortfolioOptimizer
-    """
-    optimizer = RLPortfolioOptimizer(
-        algorithm=algorithm,
-        train_timesteps=train_timesteps,
-        model_dir=model_dir
-    )
-    
-    optimizer.train(
-        stock_data=stock_data,
-        initial_balance=initial_balance,
-        transaction_cost_pct=transaction_cost_pct,
-        window_size=window_size
-    )
-    
-    return optimizer
