@@ -628,376 +628,151 @@ class MonteCarloSimulator:
         return fig
 
 
-class ThunderComputePortfolioOptimizer:
+# ThunderComputePortfolioOptimizer class has been moved to a more appropriate location
+
+def mean_variance_portfolio(returns: pd.DataFrame, risk_free_rate: float = 0.0) -> Dict[str, Any]:
     """
-    Portfolio optimization using ThunderCompute cloud infrastructure
+    Computes mean-variance optimal weights (no constraints).
+    
+    Args:
+        returns: DataFrame of asset returns
+        risk_free_rate: Risk-free rate for calculations
+        
+    Returns:
+        Dictionary with optimal weights and asset names
     """
+    cov = returns.cov()
+    mean = returns.mean()
+    inv_cov = np.linalg.pinv(cov)
+    weights = inv_cov @ mean
+    weights = weights / np.sum(weights)
+    weights_list = weights.tolist()
+    return {"weights": weights_list, "assets": list(returns.columns)}
+
+def calculate_efficient_frontier(returns: pd.DataFrame, 
+                               num_portfolios: int = 10000,
+                               risk_free_rate: float = 0.02) -> Dict[str, Any]:
+    """
+    Calculate the efficient frontier using Modern Portfolio Theory
     
-    def __init__(self, 
-                 api_key: Optional[str] = None,
-                 s3_bucket: Optional[str] = None,
-                 aws_access_key_id: Optional[str] = None,
-                 aws_secret_access_key: Optional[str] = None,
-                 aws_region: str = 'eu-north-1'):
-        """
-        Initialize the ThunderCompute portfolio optimizer
+    Args:
+        returns: DataFrame of asset returns
+        num_portfolios: Number of random portfolios to generate
+        risk_free_rate: Risk-free rate for Sharpe ratio calculation
         
-        Args:
-            api_key: ThunderCompute API key (if None, load from env)
-            s3_bucket: S3 bucket name for data storage (if None, load from env)
-            aws_access_key_id: AWS access key ID (if None, load from env)
-            aws_secret_access_key: AWS secret access key (if None, load from env)
-            aws_region: AWS region
-        """
-        # Issue deprecation warning
-        warnings.warn(
-            "This class is now part of portfolio_optimization.py. Import it directly from there.",
-            DeprecationWarning,
-            stacklevel=2
-        )
-        
-        # Load credentials from environment variables if not provided
-        self.api_key = api_key or os.environ.get('THUNDERCOMPUTE_API_KEY')
-        self.s3_bucket = s3_bucket or os.environ.get('S3_BUCKET_NAME')
-        self.aws_access_key_id = aws_access_key_id or os.environ.get('AWS_ACCESS_KEY_ID')
-        self.aws_secret_access_key = aws_secret_access_key or os.environ.get('AWS_SECRET_ACCESS_KEY')
-        self.aws_region = aws_region or os.environ.get('AWS_REGION', 'eu-north-1')
-        
-        # Validate credentials
-        if not self.api_key:
-            raise ValueError("Missing ThunderCompute API key. Please provide it as a parameter or set THUNDERCOMPUTE_API_KEY environment variable.")
-        if not self.s3_bucket:
-            raise ValueError("Missing S3 bucket name. Please provide it as a parameter or set S3_BUCKET_NAME environment variable.")
-        if not self.aws_access_key_id:
-            raise ValueError("Missing AWS access key ID. Please provide it as a parameter or set AWS_ACCESS_KEY_ID environment variable.")
-        if not self.aws_secret_access_key:
-            raise ValueError("Missing AWS secret access key. Please provide it as a parameter or set AWS_SECRET_ACCESS_KEY environment variable.")
-        
-        # Initialize S3 client if AWS dependencies are available
-        if HAS_AWS_DEPS:
-            self.s3_client = boto3.client(
-                's3',
-                aws_access_key_id=self.aws_access_key_id,
-                aws_secret_access_key=self.aws_secret_access_key,
-                region_name=self.aws_region
-            )
-        else:
-            logger.warning("AWS dependencies not found. Cloud optimization will not be available.")
-            self.s3_client = None
-        
-        # ThunderCompute API base URL
-        self.api_base_url = "https://api.thundercompute.com/v1"
-        
-        # Headers for API requests
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
+    Returns:
+        Dictionary with efficient frontier data
+    """
+    # Get number of assets
+    num_assets = len(returns.columns)
     
-    def _upload_data_to_s3(self, 
-                          data: pd.DataFrame, 
-                          file_name: str) -> str:
-        """
-        Upload data to S3 bucket
-        
-        Args:
-            data: DataFrame to upload
-            file_name: Name of the file in S3
-            
-        Returns:
-            S3 URI of the uploaded file
-        """
-        if not HAS_AWS_DEPS:
-            raise ImportError("AWS dependencies not found. Cannot upload data to S3.")
-            
-        # Convert DataFrame to CSV
-        csv_buffer = data.to_csv(index=True).encode()
-        
-        # Upload to S3
-        self.s3_client.put_object(
-            Bucket=self.s3_bucket,
-            Key=file_name,
-            Body=csv_buffer
-        )
-        
-        # Return S3 URI
-        return f"s3://{self.s3_bucket}/{file_name}"
+    # Generate random portfolios
+    results = np.zeros((3, num_portfolios))
+    weights_record = []
     
-    def _download_data_from_s3(self, 
-                              file_name: str) -> pd.DataFrame:
-        """
-        Download data from S3 bucket
+    for i in range(num_portfolios):
+        # Generate random weights
+        weights = np.random.random(num_assets)
+        weights /= np.sum(weights)
+        weights_record.append(weights)
         
-        Args:
-            file_name: Name of the file in S3
-            
-        Returns:
-            Downloaded DataFrame
-        """
-        if not HAS_AWS_DEPS:
-            raise ImportError("AWS dependencies not found. Cannot download data from S3.")
-            
-        # Download from S3
-        response = self.s3_client.get_object(
-            Bucket=self.s3_bucket,
-            Key=file_name
-        )
-        
-        # Convert to DataFrame
-        return pd.read_csv(response['Body'])
-    
-    def _submit_job(self, 
-                   job_config: Dict[str, Any]) -> str:
-        """
-        Submit a job to ThunderCompute
-        
-        Args:
-            job_config: Job configuration
-            
-        Returns:
-            Job ID
-        """
-        # Submit job
-        response = requests.post(
-            f"{self.api_base_url}/jobs",
-            headers=self.headers,
-            json=job_config
-        )
-        
-        # Check response
-        if response.status_code == 200:
-            return response.json().get('job_id', '')
-        else:
-            raise Exception(f"Failed to submit job: {response.text}")
-    
-    def _get_job_status(self, job_id: str) -> Dict[str, Any]:
-        """
-        Get job status from ThunderCompute
-        
-        Args:
-            job_id: Job ID
-            
-        Returns:
-            Job status
-        """
-        # Get job status
-        response = requests.get(
-            f"{self.api_base_url}/jobs/{job_id}",
-            headers=self.headers
-        )
-        
-        # Check response
-        if response.status_code == 200:
-            return response.json()
-        else:
-            raise Exception(f"Failed to get job status: {response.text}")
-    
-    def calculate_portfolio_metrics(self, 
-                                  returns: pd.DataFrame, 
-                                  weights: np.ndarray) -> Dict[str, float]:
-        """
-        Calculate portfolio metrics (return, volatility, Sharpe ratio)
-        
-        Args:
-            returns: DataFrame of asset returns
-            weights: Array of asset weights
-            
-        Returns:
-            Dictionary of portfolio metrics
-        """
-        # Calculate portfolio return
+        # Calculate portfolio return and volatility
         portfolio_return = np.sum(returns.mean() * weights) * 252
-        
-        # Calculate portfolio volatility
         portfolio_volatility = np.sqrt(np.dot(weights.T, np.dot(returns.cov() * 252, weights)))
         
-        # Calculate Sharpe ratio (assuming risk-free rate of 0.02)
-        sharpe_ratio = (portfolio_return - 0.02) / portfolio_volatility
+        # Calculate Sharpe Ratio
+        sharpe_ratio = (portfolio_return - risk_free_rate) / portfolio_volatility
         
-        return {
-            'return': portfolio_return,
-            'volatility': portfolio_volatility,
-            'sharpe_ratio': sharpe_ratio
+        # Store results
+        results[0, i] = portfolio_return
+        results[1, i] = portfolio_volatility
+        results[2, i] = sharpe_ratio
+    
+    # Convert to DataFrame
+    columns = ['Return', 'Volatility', 'Sharpe']
+    portfolios = pd.DataFrame(results.T, columns=columns)
+    
+    # Find optimal portfolio (maximum Sharpe ratio)
+    max_sharpe_idx = np.argmax(results[2])
+    optimal_weights = weights_record[max_sharpe_idx]
+    
+    # Find minimum volatility portfolio
+    min_vol_idx = np.argmin(results[1])
+    min_vol_weights = weights_record[min_vol_idx]
+    
+    # Calculate efficient frontier
+    target_returns = np.linspace(portfolios['Return'].min(), portfolios['Return'].max(), 100)
+    efficient_volatilities = []
+    
+    for target in target_returns:
+        # Minimize volatility for each target return
+        efficient_volatilities.append(minimize_volatility(returns, target))
+    
+    return {
+        'portfolios': portfolios,
+        'optimal_weights': dict(zip(returns.columns, optimal_weights)),
+        'optimal_return': results[0, max_sharpe_idx],
+        'optimal_volatility': results[1, max_sharpe_idx],
+        'optimal_sharpe': results[2, max_sharpe_idx],
+        'min_vol_weights': dict(zip(returns.columns, min_vol_weights)),
+        'min_vol_return': results[0, min_vol_idx],
+        'min_vol_volatility': results[1, min_vol_idx],
+        'min_vol_sharpe': results[2, min_vol_idx],
+        'efficient_frontier': {
+            'returns': target_returns,
+            'volatilities': efficient_volatilities
         }
+    }
+
+def minimize_volatility(returns: pd.DataFrame, target_return: float) -> float:
+    """
+    Find the minimum volatility for a given target return
     
-    def _negative_sharpe_ratio(self, 
-                             weights: np.ndarray, 
-                             returns: pd.DataFrame) -> float:
-        """
-        Calculate negative Sharpe ratio (for minimization)
+    Args:
+        returns: DataFrame of asset returns
+        target_return: Target portfolio return
         
-        Args:
-            weights: Array of asset weights
-            returns: DataFrame of asset returns
-            
-        Returns:
-            Negative Sharpe ratio
-        """
-        portfolio_metrics = self.calculate_portfolio_metrics(returns, weights)
-        return -portfolio_metrics['sharpe_ratio']
+    Returns:
+        Minimum volatility
+    """
+    from scipy.optimize import minimize
     
-    def optimize_portfolio(self, 
-                         price_data: pd.DataFrame, 
-                         risk_free_rate: float = 0.02,
-                         use_cloud: bool = False) -> Dict[str, Any]:
-        """
-        Optimize portfolio weights using Modern Portfolio Theory
-        
-        Args:
-            price_data: DataFrame of asset prices
-            risk_free_rate: Risk-free rate
-            use_cloud: Whether to use cloud computing
-            
-        Returns:
-            Dictionary with optimized weights and metrics
-        """
-        # Calculate returns
-        returns = price_data.pct_change().dropna()
-        
-        # If using cloud computing, submit job to ThunderCompute
-        if use_cloud:
-            if not HAS_AWS_DEPS:
-                raise ImportError("AWS dependencies not found. Cannot use cloud optimization.")
-                
-            # Upload data to S3
-            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            s3_path = self._upload_data_to_s3(
-                price_data, 
-                f"portfolio_optimization/{timestamp}/price_data.csv"
-            )
-            
-            # Submit job
-            job_config = {
-                "job_type": "portfolio_optimization",
-                "data_path": s3_path,
-                "parameters": {
-                    "risk_free_rate": risk_free_rate
-                }
-            }
-            
-            job_id = self._submit_job(job_config)
-            
-            # Wait for job to complete
-            while True:
-                job_status = self._get_job_status(job_id)
-                if job_status['status'] == 'COMPLETED':
-                    # Download results
-                    result_path = job_status['result_path']
-                    result_file = result_path.split('/')[-1]
-                    results = self._download_data_from_s3(result_file)
-                    
-                    # Parse results
-                    weights = results['weights'].values
-                    metrics = {
-                        'return': results['return'].iloc[0],
-                        'volatility': results['volatility'].iloc[0],
-                        'sharpe_ratio': results['sharpe_ratio'].iloc[0]
-                    }
-                    
-                    return {
-                        'weights': weights,
-                        'metrics': metrics,
-                        'assets': price_data.columns.tolist()
-                    }
-                
-                elif job_status['status'] == 'FAILED':
-                    raise Exception(f"Job failed: {job_status.get('error', 'Unknown error')}")
-                
-                # Sleep for 5 seconds
-                time.sleep(5)
-        
-        # Otherwise, optimize locally
-        else:
-            try:
-                from scipy.optimize import minimize
-                
-                num_assets = len(returns.columns)
-                
-                # Initial guess (equal weights)
-                initial_weights = np.array([1.0 / num_assets] * num_assets)
-                
-                # Constraints (weights sum to 1)
-                constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
-                
-                # Bounds (no short selling)
-                bounds = tuple((0, 1) for _ in range(num_assets))
-                
-                # Optimize
-                result = minimize(
-                    self._negative_sharpe_ratio,
-                    initial_weights,
-                    args=(returns,),
-                    method='SLSQP',
-                    bounds=bounds,
-                    constraints=constraints
-                )
-                
-                # Get optimized weights
-                weights = result['x']
-                
-                # Calculate metrics
-                metrics = self.calculate_portfolio_metrics(returns, weights)
-                
-                return {
-                    'weights': weights,
-                    'metrics': metrics,
-                    'assets': price_data.columns.tolist()
-                }
-            except ImportError:
-                raise ImportError("SciPy not found. Cannot perform local optimization.")
+    num_assets = len(returns.columns)
+    args = (returns,)
     
-    def backtest_portfolio(self, 
-                         price_data: pd.DataFrame, 
-                         weights: np.ndarray, 
-                         start_date: Optional[str] = None, 
-                         end_date: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Backtest portfolio performance
+    # Initial guess (equal weights)
+    initial_weights = np.array([1.0 / num_assets] * num_assets)
+    
+    # Constraints
+    constraints = (
+        {'type': 'eq', 'fun': lambda x: np.sum(x) - 1},  # Weights sum to 1
+        {'type': 'eq', 'fun': lambda x: np.sum(returns.mean() * x) * 252 - target_return}  # Target return
+    )
+    
+    # Bounds (no short selling)
+    bounds = tuple((0, 1) for _ in range(num_assets))
+    
+    # Minimize volatility
+    result = minimize(
+        portfolio_volatility,
+        initial_weights,
+        args=args,
+        method='SLSQP',
+        bounds=bounds,
+        constraints=constraints
+    )
+    
+    return result['fun']
+
+def portfolio_volatility(weights: np.ndarray, returns: pd.DataFrame) -> float:
+    """
+    Calculate portfolio volatility
+    
+    Args:
+        weights: Array of asset weights
+        returns: DataFrame of asset returns
         
-        Args:
-            price_data: DataFrame of asset prices
-            weights: Array of asset weights
-            start_date: Start date for backtest (if None, use first date in price_data)
-            end_date: End date for backtest (if None, use last date in price_data)
-            
-        Returns:
-            Dictionary with backtest results
-        """
-        # Filter data by date range
-        if start_date:
-            price_data = price_data[price_data.index >= start_date]
-        if end_date:
-            price_data = price_data[price_data.index <= end_date]
-        
-        # Calculate returns
-        returns = price_data.pct_change().dropna()
-        
-        # Calculate portfolio returns
-        portfolio_returns = returns.dot(weights)
-        
-        # Calculate cumulative returns
-        cumulative_returns = (1 + portfolio_returns).cumprod()
-        
-        # Calculate metrics
-        total_return = cumulative_returns.iloc[-1] - 1
-        annualized_return = (1 + total_return) ** (252 / len(returns)) - 1
-        annualized_volatility = portfolio_returns.std() * np.sqrt(252)
-        sharpe_ratio = annualized_return / annualized_volatility
-        
-        # Calculate drawdowns
-        wealth_index = (1 + portfolio_returns).cumprod()
-        previous_peaks = wealth_index.cummax()
-        drawdowns = (wealth_index - previous_peaks) / previous_peaks
-        max_drawdown = drawdowns.min()
-        
-        return {
-            'portfolio_returns': portfolio_returns,
-            'cumulative_returns': cumulative_returns,
-            'metrics': {
-                'total_return': total_return,
-                'annualized_return': annualized_return,
-                'annualized_volatility': annualized_volatility,
-                'sharpe_ratio': sharpe_ratio,
-                'max_drawdown': max_drawdown
-            }
-        }
+    Returns:
+        Portfolio volatility
+    """
+    return np.sqrt(np.dot(weights.T, np.dot(returns.cov() * 252, weights)))

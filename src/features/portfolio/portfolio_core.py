@@ -19,11 +19,12 @@ import pickle
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 
 # Import portfolio modules
-from stocker.cloud.portfolio_config import PortfolioConfig
-from stocker.cloud.portfolio_risk import PortfolioRiskAnalyzer
-from stocker.cloud.portfolio_backtest import backtest_portfolio, compare_strategies
-from stocker.cloud.portfolio_backtester import PortfolioBacktester
-from stocker.cloud.portfolio_visualization import PortfolioVisualizer
+from .portfolio_config import PortfolioConfig
+from .portfolio_risk import PortfolioRiskAnalyzer
+from .portfolio_backtester import PortfolioBacktester
+from .portfolio_visualization import PortfolioVisualizer
+from .portfolio_metrics_consolidated import peer_compare, chart_performance
+from src.utils.helpers import top_n_recommender
 from stocker.portfolio.monte_carlo import MonteCarloSimulator
 from stocker.portfolio.rl_optimizer import RLPortfolioOptimizer
 
@@ -106,9 +107,6 @@ class PortfolioManager:
         self.backtester = PortfolioBacktester(config=self.config)
         self.monte_carlo = MonteCarloSimulator()
         
-        # Initialize cache
-        self.cache = PortfolioCache()
-        
         # Portfolio state
         self.price_data = None
         self.returns_data = None
@@ -180,6 +178,108 @@ class PortfolioManager:
                 pickle.dump(value, f)
         except Exception as e:
             logger.warning(f"Cache write error: {e}")
+            
+    def suggest_stocks(self, market_data: Dict[str, Any], filters: Dict[str, Any]) -> List[Any]:
+        """
+        Suggest high-quality stocks based on filters.
+        
+        Args:
+            market_data: Dictionary with market data
+            filters: Dictionary with filter criteria
+            
+        Returns:
+            List of suggested stocks
+        """
+        # Implementation would filter stocks based on criteria
+        # This is a placeholder for the actual implementation
+        logger.info(f"Suggesting stocks with filters: {filters}")
+        return []
+    
+    def peer_compare(self, price_history_map: Dict[str, List[float]], target: str, n: int = 5) -> Dict[str, Any]:
+        """
+        Compare the target symbol to peers by return correlation.
+        Returns top-n peers with correlation values.
+        
+        Args:
+            price_history_map: Dictionary mapping symbols to price histories
+            target: Target symbol
+            n: Number of peers to return
+            
+        Returns:
+            Dictionary with target and peers
+        """
+
+    def analyze_exposures(self, weights: Dict[str, float], sector_map: Dict[str, str], asset_class_map: Dict[str, str]) -> Dict[str, Any]:
+        """
+        Analyzes sector and asset class exposures of the portfolio.
+        Moved from financial_analysis.py
+
+        Args:
+            weights: Dictionary mapping symbols to weights.
+            sector_map: Dictionary mapping symbols to sectors.
+            asset_class_map: Dictionary mapping symbols to asset classes.
+
+        Returns:
+            Dictionary with exposure analysis results (sector and asset class breakdowns).
+        """
+        sector_exposure = {}
+        asset_class_exposure = {}
+        total_weight = sum(weights.values())
+
+        if abs(total_weight - 1.0) > 1e-6:
+            logger.warning(f"Portfolio weights do not sum to 1 (sum={total_weight}). Normalizing.")
+            if total_weight == 0: return {'sector_exposure': {}, 'asset_class_exposure': {}} # Avoid division by zero
+            weights = {symbol: weight / total_weight for symbol, weight in weights.items()}
+
+        for symbol, weight in weights.items():
+            # Sector Exposure
+            sector = sector_map.get(symbol, 'Unknown')
+            sector_exposure[sector] = sector_exposure.get(sector, 0) + weight
+
+            # Asset Class Exposure
+            asset_class = asset_class_map.get(symbol, 'Unknown')
+            asset_class_exposure[asset_class] = asset_class_exposure.get(asset_class, 0) + weight
+
+        # Sort for consistent output
+        sorted_sector_exposure = dict(sorted(sector_exposure.items(), key=lambda item: item[1], reverse=True))
+        sorted_asset_class_exposure = dict(sorted(asset_class_exposure.items(), key=lambda item: item[1], reverse=True))
+
+        return {
+            'sector_exposure': sorted_sector_exposure,
+            'asset_class_exposure': sorted_asset_class_exposure
+        }
+        return peer_compare(price_history_map, target, n)
+    
+    def chart_performance(self, dates: List[str], price_history_map: Dict[str, List[float]]) -> Dict[str, Any]:
+        """
+        Compute quarterly and yearly returns for given price series.
+        
+        Args:
+            dates: List of date strings (ISO format)
+            price_history_map: Dictionary mapping symbols to price histories
+            
+        Returns:
+            Dictionary with quarterly and yearly returns
+        """
+        return chart_performance(dates, price_history_map)
+    
+    # The top_n_recommender function is now imported from src.utils.helpers
+    # This method can be removed or adapted if PortfolioManager needs specific logic
+    # For now, let's keep it as a wrapper, but log a warning if used directly.
+    def top_n_recommender(self, df: pd.DataFrame, score_col: str = "score", n: int = 5) -> List[str]:
+        logger.warning("PortfolioManager.top_n_recommender is deprecated. Use the function from src.utils.helpers directly.")
+        """
+        Returns top-N items by score.
+        
+        Args:
+            df: DataFrame with scores
+            score_col: Column name for scores
+            n: Number of items to return
+            
+        Returns:
+            List of top-N item indices
+        """
+        return top_n_recommender(df, score_col, n) # Calls the imported function
     
     def cached(func):
         """Decorator to cache function results"""
@@ -575,30 +675,31 @@ def run_backtest(self,
         self.backtest_results = cached_result
         return self.backtest_results
     
+    # Use the PortfolioBacktester class for all backtesting
+    backtester = PortfolioBacktester(config=self.config)
+    
+    # Create a strategy function that always returns the same weights
+    def constant_weight_strategy(historical_data):
+        return self.current_weights
+    
     # Run backtest with parallel processing for large datasets
     if len(self.price_data) > 1000 and self.use_parallel:
         logger.info("Using parallel processing for large dataset backtest")
-        self.backtest_results = self._run_backtest_parallel(
-            start_date=start_date,
-            end_date=end_date,
-            initial_investment=initial_investment,
-            rebalance_frequency=rebalance_frequency
-        )
-    else:
-        self.backtest_results = backtest_portfolio(
-            price_data=self.price_data,
-            weights=self.current_weights,
-            start_date=start_date,
-            end_date=end_date,
-            initial_investment=initial_investment,
-            rebalance_frequency=rebalance_frequency,
-            config=self.config
-        )
+        # Implement parallel backtesting if needed
+    
+    self.backtest_results = backtester.backtest_strategy(
+        price_data=self.price_data,
+        strategy_func=constant_weight_strategy,
+        initial_capital=initial_investment,
+        start_date=start_date,
+        end_date=end_date,
+        rebalance_frequency=rebalance_frequency
+    )
     
     # Cache the results
     self._cache_set(cache_key, self.backtest_results)
     
-    logger.info(f"Completed backtest: Final value=${self.backtest_results['final_value']:.2f}")
+    logger.info(f"Completed backtest: Final value=${self.backtest_results['portfolio_values'].iloc[-1]:.2f}")
     return self.backtest_results
 
 def _run_backtest_parallel(self,

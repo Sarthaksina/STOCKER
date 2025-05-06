@@ -3,103 +3,45 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import numpy as np
-import logging
 
 from src.configuration.config import settings
-from src.features.portfolio import recommend_portfolio, self_assess_portfolio, advanced_rebalance_portfolio, suggest_high_quality_stocks, peer_compare, top_n_recommender, chart_performance
+# Import from refactored portfolio module
+# Import from the portfolio facade module which maintains backward compatibility
+from src.features.portfolio import (
+    PortfolioManager, # Import the manager class
+    get_portfolio_manager, # Keep if used directly, otherwise remove
+    recommend_portfolio, self_assess_portfolio, advanced_rebalance_portfolio,
+    get_portfolio_manager
+)
+# Import all metrics functions from the consolidated metrics file
+from src.features.portfolio.portfolio_metrics_consolidated import (
+    peer_compare, chart_performance, performance_analysis as portfolio_performance_analysis, 
+    sharpe_ratio as portfolio_sharpe_ratio, valuation_metrics as portfolio_valuation_metrics, 
+    alpha_beta as portfolio_alpha_beta, attribution_analysis as portfolio_attribution_analysis, 
+    momentum_analysis as portfolio_momentum_analysis, sentiment_agg
+)
+# Import risk functions from portfolio_risk
+from src.features.portfolio.portfolio_risk import (
+    calculate_var, calculate_cvar, calculate_drawdown
+)
+from src.utils.helpers import top_n_recommender
 from src.features.vector_search import add_vector_similarity
-import feedparser
-from src.constant.constants import GOOGLE_NEWS_RSS
-from src.llm_utils import analyze_sentiment
-from src.db import get_collection
 
 logger = logging.getLogger(__name__)
 
-# --- Core Analytics (inlined from analysis.py)
-def performance_analysis(prices: List[float]) -> Dict[str, float]:
-    """
-    Returns total return, annualized return, and volatility from price series.
-    """
-    returns = np.diff(prices) / prices[:-1]
-    total_return = (prices[-1] / prices[0]) - 1
-    ann_return = (1 + total_return) ** (12 / len(returns)) - 1 if len(returns) > 0 else 0
-    volatility = np.std(returns) * np.sqrt(12)
-    return {
-        "total_return": float(total_return),
-        "annualized_return": float(ann_return),
-        "volatility": float(volatility)
-    }
+# --- Core Analytics Functions (Moved to portfolio modules) ---
 
-def sharpe_ratio(returns: List[float], risk_free_rate: float = 0.04) -> float:
-    """
-    Returns the Sharpe ratio of returns series.
-    """
-    excess = np.array(returns) - risk_free_rate / 12
-    return float(np.mean(excess) / (np.std(excess) + 1e-8) * np.sqrt(12))
-
-def valuation_metrics(stock_data: Dict[str, Any]) -> Dict[str, float]:
-    """
-    Returns PE, PB, dividend yield, and market cap from fundamentals.
-    """
-    return {
-        "pe": stock_data.get("pe", np.nan),
-        "pb": stock_data.get("pb", np.nan),
-        "div_yield": stock_data.get("div_yield", np.nan),
-        "market_cap": stock_data.get("market_cap", np.nan)
-    }
-
-def alpha_beta(prices: List[float], benchmark: List[float]) -> Dict[str, float]:
-    """
-    Computes alpha and beta relative to benchmark.
-    """
-    returns = np.diff(prices) / prices[:-1]
-    bench_ret = np.diff(benchmark) / benchmark[:-1]
-    cov = np.cov(returns, bench_ret)[0][1]
-    # Handle zero variance in benchmark returns: perfect correlation
-    denom = np.var(bench_ret)
-    if denom < 1e-8:
-        beta = 1.0
-        alpha = 0.0
-    else:
-        beta = cov / denom
-        alpha = np.mean(returns) - beta * np.mean(bench_ret)
-    return {"alpha": float(alpha), "beta": float(beta)}
-
-def attribution_analysis(portfolio: Dict[str, float], returns: Dict[str, float]) -> Dict[str, float]:
-    """
-    Decomposes portfolio return into asset contributions.
-    """
-    contrib = {k: portfolio[k] * returns.get(k, 0) for k in portfolio}
-    total = sum(contrib.values())
-    return {k: v / total if total else 0 for k, v in contrib.items()}
-
-def exposure_analysis(portfolio: Dict[str, float], sector_map: Dict[str, str], asset_class_map: Dict[str, str]) -> Dict[str, Any]:
-    """
-    Checks sector and asset class exposures.
-    """
-    sector_exp, asset_exp = {}, {}
-    for stock, weight in portfolio.items():
-        sector = sector_map.get(stock, "Other")
-        asset = asset_class_map.get(stock, "Other")
-        sector_exp[sector] = sector_exp.get(sector, 0) + weight
-        asset_exp[asset] = asset_exp.get(asset, 0) + weight
-    over_exp = {k: v for k, v in sector_exp.items() if v > 0.4}
-    under_exp = {k: v for k, v in sector_exp.items() if v < 0.1}
-    return {"sector_exposure": sector_exp, "asset_exposure": asset_exp, "over_exposed": over_exp, "under_exposed": under_exp}
-
-def momentum_analysis(prices: List[float]) -> float:
-    """
-    Simple momentum: last price / 6-month average.
-    """
-    if len(prices) < 6:
-        return np.nan
-    return float(prices[-1] / np.mean(prices[-6:]))
+# Functions sharpe_ratio, valuation_metrics, alpha_beta, attribution_analysis, momentum_analysis moved to portfolio_metrics.py
+# Function exposure_analysis moved to portfolio_core.py (PortfolioManager class)
 
 class AnalyticsAgents:
     """
     Orchestrates analytics and portfolio features.
     """
     def __init__(self):
+        # Get portfolio manager instance
+        self.pm = get_portfolio_manager()
+        
         self.tasks: Dict[str, Any] = {
             'portfolio': self.portfolio,
             'self_assess': self.self_assess,
@@ -146,8 +88,8 @@ class AnalyticsAgents:
         )
 
     def suggest_hq(self, params: Dict[str, Any]) -> List[Any]:
-        return suggest_high_quality_stocks(
-            config=settings,
+        # Use PortfolioManager's method
+        return self.pm.suggest_stocks(
             market_data=params.get('market_data', {}),
             filters=params.get('filters', {})
         )
@@ -171,27 +113,42 @@ class AnalyticsAgents:
             price_history_map=params.get('price_history_map', {})
         )
 
-    def risk_var(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        return var_historical(
-            returns=params.get('returns', []),
-            confidence=params.get('confidence', 0.05)
+    def risk_var(self, params: Dict[str, Any]) -> float:
+        # Use imported calculate_var function
+        returns_series = pd.Series(params.get('returns', []))
+        return calculate_var(
+            returns=returns_series,
+            confidence_level=params.get('confidence', 0.95), # Default to 95%
+            method=params.get('method', 'historical') # Allow specifying method
         )
 
-    def risk_drawdown(self, params: Dict[str, Any]) -> Any:
-        return max_drawdown(prices=params.get('prices', []))
+    def risk_drawdown(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        # Use imported calculate_drawdown function
+        returns_series = pd.Series(params.get('returns', [])) # Needs returns, not prices
+        if 'prices' in params and not returns_series.any(): # Calculate returns if only prices given
+             prices = params.get('prices', [])
+             if len(prices) > 1:
+                 returns_series = pd.Series(np.diff(prices) / prices[:-1])
+        
+        drawdown_info = calculate_drawdown(returns=returns_series)
+        return {
+            'max_drawdown': drawdown_info[1], 
+            'average_drawdown': drawdown_info[2]
+            # drawdown_series (drawdown_info[0]) is likely too large for direct return
+        }
 
-    def risk_sharpe(self, params: Dict[str, Any]) -> Any:
-        return rolling_sharpe(
+    def risk_sharpe(self, params: Dict[str, Any]) -> float:
+        # Use the moved sharpe_ratio function
+        # Note: rolling_sharpe is not defined here, using the basic one
+        return portfolio_sharpe_ratio(
             returns=params.get('returns', []),
-            window=params.get('window', 12),
             risk_free_rate=params.get('risk_free_rate', 0.04)
         )
+        # If rolling sharpe is needed, it should be implemented in portfolio_metrics or portfolio_risk
 
     def sentiment_agg(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        return get_news_sentiment(
-            symbol=params.get('symbol', ''),
-            config=settings
-        )
+        # Use the imported sentiment_agg function
+        return sentiment_agg(params)
 
     def holdings(self, params: Dict[str, Any]) -> Any:
         return analyze_holdings(
@@ -200,28 +157,37 @@ class AnalyticsAgents:
         )
 
     def analysis_performance(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        return performance_analysis(params.get('prices', []))
+        # Use the moved performance_analysis function
+        return portfolio_performance_analysis(params.get('prices', []))
 
     def analysis_sharpe(self, params: Dict[str, Any]) -> float:
-        return sharpe_ratio(params.get('returns', []), params.get('risk_free_rate', 0.04))
+        # Use the moved sharpe_ratio function
+        return portfolio_sharpe_ratio(params.get('returns', []), params.get('risk_free_rate', 0.04))
 
     def analysis_valuation(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        return valuation_metrics(params.get('stock_data', {}))
+        # Use the moved valuation_metrics function
+        return portfolio_valuation_metrics(params.get('stock_data', {}))
 
     def analysis_alpha_beta(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        return alpha_beta(
+        # Use the moved alpha_beta function
+        return portfolio_alpha_beta(
             prices=params.get('prices', []),
             benchmark=params.get('benchmark', [])
         )
 
     def analysis_attribution(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        return attribution_analysis(
+        # Use the moved attribution_analysis function
+        return portfolio_attribution_analysis(
             portfolio=params.get('portfolio', {}),
             returns=params.get('returns', {})
         )
 
     def analysis_momentum(self, params: Dict[str, Any]) -> float:
-        return momentum_analysis(params.get('prices', []))
+        # Use the moved momentum_analysis function
+        return portfolio_momentum_analysis(
+            prices=params.get('prices', []),
+            window=params.get('window', 6) # Allow specifying window
+        )
 
     def vector_search(self, params: Dict[str, Any]) -> Any:
         return add_vector_similarity(
@@ -231,7 +197,7 @@ class AnalyticsAgents:
             out_col=params.get('out_col', 'similarity')
         )
 
-# Inline risk, sentiment, and holdings utilities
+# Inline risk and holdings utilities (Sentiment moved)
 def var_historical(returns: List[float], confidence: float = 0.05) -> Dict[str, float]:
     arr = np.array(returns)
     if arr.size == 0:
@@ -262,19 +228,7 @@ def rolling_sharpe(returns: List[float], window: int = 12, risk_free_rate: float
             result.append(float(mean_ex / std_ex * np.sqrt(window)))
     return {"rolling_sharpe": result}
 
-def get_news_sentiment(symbol: str, config) -> Dict[str, Any]:
-    url = GOOGLE_NEWS_RSS.format(query=symbol)
-    feed = feedparser.parse(url)
-    entries = feed.entries[: config.max_news_articles]
-    results: List[Dict[str, Any]] = []
-    for entry in entries:
-        title = entry.get("title", "")
-        label = analyze_sentiment(title)
-        results.append({"title": title, "sentiment": label})
-    counts = {"POSITIVE": 0, "NEGATIVE": 0, "NEUTRAL": 0}
-    for item in results:
-        counts[item["sentiment"]] = counts.get(item["sentiment"], 0) + 1
-    return {"symbol": symbol, "counts": counts, "details": results}
+# get_news_sentiment moved to financial_analysis.py as part of sentiment_agg
 
 def analyze_holdings(symbol: str, config) -> Any:
     collection = get_collection("shareholding_patterns", config.mongodb_db_name)

@@ -13,7 +13,7 @@ from typing import Dict, List, Tuple, Optional, Any, Union, Callable
 from datetime import datetime, timedelta
 import queue
 
-from stocker.cloud.portfolio_config import PortfolioConfig
+from .portfolio_config import PortfolioConfig
 
 # Configure logging
 logger = logging.getLogger(__name__)

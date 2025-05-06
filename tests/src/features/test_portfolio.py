@@ -2,7 +2,9 @@ import pytest
 import pandas as pd
 import numpy as np
 from stocker.src.features.portfolio import (
-    mean_variance_portfolio, exposure_analysis, recommend_portfolio,
+    mean_variance_portfolio, exposure_analysis, recommend_portfolio
+)
+from stocker.src.features.portfolio.portfolio_metrics_consolidated import (
     peer_compare, chart_performance
 )
 

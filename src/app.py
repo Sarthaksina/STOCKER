@@ -13,9 +13,10 @@ from src.features.modeling import (
 )
 from src.features.news_agent import search_news
 from src.features.concall_agent import analyze_concall
-from src.features.peer_comparison import top_n_recommender
+from src.utils.helpers import top_n_recommender
 from src.features.vector_search import add_vector_similarity
-from src.features.portfolio import mean_variance_portfolio, exposure_analysis
+from src.features.portfolio.portfolio_optimization import mean_variance_portfolio
+from src.features.portfolio.portfolio_risk import exposure_analysis
 from src.features.reporting import generate_report
 
 # --- Mock Data ---

@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from typing import Dict, Any, List, Optional
 from src.entity.config_entity import StockerConfig
 from src.features.agent import Agent as StockerAgent
-from src.features.portfolio import recommend_portfolio, self_assess_portfolio, advanced_rebalance_portfolio, suggest_high_quality_stocks
+from src.features.portfolio import recommend_portfolio, self_assess_portfolio, advanced_rebalance_portfolio, suggest_high_quality_stocks, get_portfolio_manager
 from src.features.holdings import analyze_holdings
 from src.features.events import get_corporate_events
 from src.features.sentiment import get_news_sentiment

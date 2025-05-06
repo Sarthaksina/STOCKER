@@ -14,7 +14,7 @@ import logging
 from typing import Dict, List, Tuple, Optional, Any, Union
 from datetime import datetime
 
-from stocker.cloud.portfolio_config import PortfolioConfig
+from .portfolio_config import PortfolioConfig
 
 # Configure logging
 logger = logging.getLogger(__name__)

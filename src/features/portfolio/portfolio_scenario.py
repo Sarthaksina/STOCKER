@@ -11,8 +11,8 @@ from typing import Dict, List, Tuple, Optional, Any, Union
 from datetime import datetime
 import scipy.stats as stats
 
-from stocker.cloud.portfolio_config import PortfolioConfig
-from stocker.cloud.portfolio_risk import PortfolioRiskAnalyzer
+from .portfolio_config import PortfolioConfig
+from .portfolio_risk import PortfolioRiskAnalyzer
 
 # Configure logging
 logger = logging.getLogger(__name__)

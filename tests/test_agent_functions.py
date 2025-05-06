@@ -14,11 +14,13 @@ from src.features.analytics_agents import (
     max_drawdown,
     rolling_sharpe
 )
+# Import from the portfolio facade module which maintains backward compatibility
 from src.features.portfolio import (
     recommend_portfolio,
     peer_compare,
     top_n_recommender,
-    chart_performance
+    chart_performance,
+    get_portfolio_manager
 )
 
 

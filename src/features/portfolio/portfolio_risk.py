@@ -255,6 +255,29 @@ class PortfolioRiskAnalyzer:
 #     """ Duplicate removed """
 #     pass
 
+def exposure_analysis(portfolio: Dict[str, float], sector_map: Dict[str, str], asset_class_map: Dict[str, str]) -> Dict[str, Any]:
+    """
+    Checks for over/under-exposure to sectors and asset classes.
+    
+    Args:
+        portfolio: Dictionary mapping stock symbols to weights
+        sector_map: Dictionary mapping stock symbols to sectors
+        asset_class_map: Dictionary mapping stock symbols to asset classes
+        
+    Returns:
+        Dictionary with sector and asset class exposures and over/under-exposed sectors
+    """
+    sector_exp = {}
+    asset_exp = {}
+    for stock, weight in portfolio.items():
+        sector = sector_map.get(stock, "Other")
+        asset = asset_class_map.get(stock, "Other")
+        sector_exp[sector] = sector_exp.get(sector, 0) + weight
+        asset_exp[asset] = asset_exp.get(asset, 0) + weight
+    over_exp = {k: v for k, v in sector_exp.items() if v > 0.4}
+    under_exp = {k: v for k, v in sector_exp.items() if v < 0.1}
+    return {"sector_exposure": sector_exp, "asset_exposure": asset_exp, "over_exposed": over_exp, "under_exposed": under_exp}
+
 # --- MonteCarloSimulator Class (Moved from portfolio/monte_carlo.py) ---
 class MonteCarloSimulator:
     """

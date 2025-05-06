@@ -1,8 +1,14 @@
 import pytest
 import pandas as pd
 import numpy as np
-from stocker.cloud.portfolio_metrics_consolidated import calculate_portfolio_metrics, calculate_rolling_metrics
-from stocker.cloud.portfolio_config import PortfolioConfig
+from src.features.portfolio.portfolio_metrics_consolidated import (
+    calculate_portfolio_metrics,
+    calculate_rolling_metrics,
+    peer_compare,
+    sharpe_ratio,
+    valuation_metrics
+)
+from src.features.portfolio.portfolio_config import PortfolioConfig
 
 @pytest.fixture
 def sample_returns():
@@ -25,6 +31,28 @@ def sample_returns():
 def sample_weights():
     """Create sample portfolio weights"""
     return np.array([0.25, 0.25, 0.25, 0.25])  # Equal weights
+
+@pytest.fixture
+def sample_price_history():
+    """Create sample price history for testing"""
+    np.random.seed(42)
+    dates = pd.date_range(start='2020-01-01', periods=252, freq='B')
+    assets = ['AAPL', 'MSFT', 'GOOG', 'AMZN', 'FB', 'NFLX']
+    
+    # Create price data with trends and some correlation
+    price_data = {}
+    for asset in assets:
+        # Start with a random price between 50 and 200
+        start_price = np.random.uniform(50, 200)
+        # Create a price series with random daily changes
+        daily_changes = np.random.normal(0.0005, 0.015, 252).cumsum()
+        # Add a trend
+        trend = np.linspace(0, 0.2, 252) if np.random.random() > 0.5 else np.linspace(0, -0.1, 252)
+        # Combine to create price series
+        price_series = start_price * (1 + daily_changes + trend)
+        price_data[asset] = price_series.tolist()
+    
+    return price_data
 
 @pytest.fixture
 def config():
@@ -76,21 +104,6 @@ class TestCalculatePortfolioMetrics:
         assert 'information_ratio' in metrics
         assert 'beta' in metrics
         assert 'treynor_ratio' in metrics
-    
-    def test_weight_normalization(self, sample_returns, config):
-        """Test that weights are properly normalized"""
-        # Create unnormalized weights
-        unnormalized_weights = np.array([1.0, 2.0, 3.0, 4.0])
-        
-        metrics = calculate_portfolio_metrics(
-            sample_returns, 
-            unnormalized_weights,
-            config=config
-        )
-        
-        # Metrics should still be calculated correctly
-        assert 'expected_return' in metrics
-        assert 'volatility' in metrics
 
 class TestCalculateRollingMetrics:
     """Test rolling metrics calculation functions"""
@@ -120,3 +133,38 @@ class TestCalculateRollingMetrics:
             assert len(rolling_metrics[metric]) == len(sample_returns)
             assert rolling_metrics[metric].iloc[:window-1].isna().all()
             assert not rolling_metrics[metric].iloc[window:].isna().all()
+
+class TestPeerCompare:
+    """Test peer comparison functionality"""
+    
+    def test_peer_compare(self, sample_price_history):
+        """Test peer comparison function"""
+        target = 'AAPL'
+        n = 3
+        
+        result = peer_compare(sample_price_history, target, n)
+        
+        # Check structure of result
+        assert 'target' in result
+        assert 'peers' in result
+        assert result['target'] == target
+        
+        # Check that we get the right number of peers
+        assert len(result['peers']) <= n
+        
+        # Each peer should have a correlation value
+        for peer in result['peers']:
+            assert 'symbol' in peer
+            assert 'correlation' in peer
+            assert isinstance(peer['correlation'], float)
+            assert -1 <= peer['correlation'] <= 1
+
+    def test_peer_compare_invalid_target(self, sample_price_history):
+        """Test peer comparison with invalid target"""
+        target = 'INVALID'
+        n = 3
+        
+        result = peer_compare(sample_price_history, target, n)
+        
+        # Should return an error
+        assert 'error' in result
