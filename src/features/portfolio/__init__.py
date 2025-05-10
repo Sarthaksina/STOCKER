@@ -5,12 +5,10 @@ It implements the Facade pattern through PortfolioFacade to provide a simplified
 portfolio functionality while still allowing direct access to individual components when needed.
 
 Components:
-    - portfolio_metrics_consolidated: Performance and risk metrics calculation
-    - portfolio_risk: Risk analysis and stress testing
-    - portfolio_optimization: Portfolio optimization algorithms
-    - portfolio_backtester: Backtesting framework
-    - portfolio_visualization: Visualization utilities
-    - portfolio_reporting: Report generation
+    - core: Core portfolio management functionality
+    - analysis: Performance and risk metrics calculation
+    - optimizer: Portfolio optimization algorithms
+    - visualization: Visualization utilities
     - portfolio_facade: Simplified interface to portfolio functionality
 
 Usage Examples:
@@ -20,56 +18,44 @@ Usage Examples:
     metrics = portfolio.calculate_metrics(returns, weights)
     
     # Direct access to specific components (for advanced use cases)
-    from src.features.portfolio import calculate_portfolio_metrics
-    metrics = calculate_portfolio_metrics(returns, weights)
-
-Note: All functionality from the previous portfolio_metrics.py has been consolidated into
-portfolio_metrics_consolidated.py for better organization and maintainability.
+    from src.features.portfolio import optimize_portfolio
+    result = optimize_portfolio(returns, objective='sharpe')
 """
 
 # Import core classes for direct access
-from .portfolio_core import PortfolioManager, get_portfolio_manager
-from .portfolio_risk import PortfolioRiskAnalyzer
-from .portfolio_backtester import PortfolioBacktester
-from .portfolio_visualization import PortfolioVisualizer
+from .core import PortfolioManager, get_portfolio_manager
 from .portfolio_facade import PortfolioFacade
 
-# Import key functions for backward compatibility
-from .portfolio_core import (
+# Import key functions for direct access
+from .core import (
     recommend_portfolio,
     self_assess_portfolio,
     advanced_rebalance_portfolio
 )
 
-# Import metrics functions that were previously in other modules
-from .portfolio_metrics_consolidated import (
-    # Core metrics
-    calculate_portfolio_metrics,
-    calculate_rolling_metrics,
-    
-    # Performance analysis
-    peer_compare,
-    chart_performance,
-    performance_analysis,
-    
-    # Risk and return metrics
-    sharpe_ratio,
-    alpha_beta,
-    attribution_analysis,
-    momentum_analysis,
-    
-    # Fundamental and sentiment
-    valuation_metrics,
-    sentiment_agg
+# Import from optimizer module
+from .optimizer import (
+    PortfolioOptimizer,
+    EfficientFrontier,
+    optimize_portfolio
+)
+
+# Import from analysis module
+from .analysis import (
+    calculate_portfolio_statistics,
+    calculate_sharpe_ratio,
+    calculate_sortino_ratio,
+    calculate_max_drawdown,
+    calculate_var,
+    calculate_cvar
 )
 
 __all__ = [
     # Classes
     'PortfolioManager',
-    'PortfolioRiskAnalyzer',
-    'PortfolioBacktester',
-    'PortfolioVisualizer',
-    'PortfolioFacade',  # Main facade class
+    'PortfolioFacade',
+    'PortfolioOptimizer',
+    'EfficientFrontier',
     
     # Factory functions
     'get_portfolio_manager',
@@ -79,16 +65,14 @@ __all__ = [
     'self_assess_portfolio',
     'advanced_rebalance_portfolio',
     
-    # Metrics functions
-    'calculate_portfolio_metrics',
-    'calculate_rolling_metrics',
-    'peer_compare',
-    'chart_performance',
-    'performance_analysis',
-    'sharpe_ratio',
-    'alpha_beta',
-    'attribution_analysis',
-    'momentum_analysis',
-    'valuation_metrics',
-    'sentiment_agg'
+    # Optimization functions
+    'optimize_portfolio',
+    
+    # Analysis functions
+    'calculate_portfolio_statistics',
+    'calculate_sharpe_ratio',
+    'calculate_sortino_ratio',
+    'calculate_max_drawdown',
+    'calculate_var',
+    'calculate_cvar'
 ]

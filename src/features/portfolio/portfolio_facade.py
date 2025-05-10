@@ -1,255 +1,201 @@
-"""Portfolio Facade Module
+"""
+Portfolio Facade Module for STOCKER Pro
 
 This module implements the Facade pattern to provide a simplified interface
-to the portfolio module's functionality. It serves as a single entry point
-for accessing the most commonly used portfolio functions.
-
-Classes:
-    PortfolioFacade: Main facade class that provides access to portfolio functionality
-
-Usage:
-    from src.features.portfolio.portfolio_facade import PortfolioFacade
-    
-    # Create a facade instance
-    portfolio = PortfolioFacade()
-    
-    # Use the facade to access portfolio functionality
-    metrics = portfolio.calculate_metrics(returns, weights)
-    optimized_weights = portfolio.optimize(returns)
-    backtest_results = portfolio.backtest(price_data, strategy_func)
+to the portfolio functionality while still allowing direct access to individual 
+components when needed.
 """
 
-from typing import Dict, List, Optional, Any, Callable, Union
-import numpy as np
 import pandas as pd
+from typing import Dict, List, Optional, Union, Any
 
-from .portfolio_config import PortfolioConfig
-from .portfolio_metrics_consolidated import (
-    calculate_portfolio_metrics,
-    calculate_rolling_metrics,
-    peer_compare,
-    sharpe_ratio,
-    alpha_beta,
-    attribution_analysis,
-    momentum_analysis,
-    performance_analysis,
-    chart_performance,
-    valuation_metrics,
-    sentiment_agg
-)
-from .portfolio_risk import PortfolioRiskAnalyzer
-from .portfolio_backtester import PortfolioBacktester
-from .portfolio_optimization import optimize_portfolio
+from .core import PortfolioManager
+from .analysis import calculate_portfolio_statistics
+from .optimizer import optimize_portfolio, EfficientFrontier
+from src.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class PortfolioFacade:
-    """Facade class for portfolio functionality
+    """
+    Facade class that provides a simplified interface to portfolio functionality.
     
-    This class provides a simplified interface to the portfolio module's functionality.
-    It encapsulates the complexity of the underlying components and provides a clean,
-    high-level API for common portfolio operations.
+    This class follows the Facade design pattern, offering a unified high-level
+    interface to the various portfolio subsystems while still allowing direct
+    access to those subsystems when needed.
     """
     
-    def __init__(self, config: Optional[PortfolioConfig] = None):
-        """Initialize the portfolio facade
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        """
+        Initialize the portfolio facade.
         
         Args:
-            config: Optional portfolio configuration
+            config (Dict[str, Any], optional): Configuration dictionary. Defaults to None.
         """
-        self.config = config or PortfolioConfig()
-        self.risk_analyzer = PortfolioRiskAnalyzer(config=self.config)
-        self.backtester = PortfolioBacktester(config=self.config)
-        
-    # Metrics methods
-    def calculate_metrics(self, returns: pd.DataFrame, weights: np.ndarray, 
-                         benchmark_returns: Optional[pd.Series] = None) -> Dict[str, float]:
-        """Calculate portfolio metrics
-        
-        Args:
-            returns: DataFrame of asset returns
-            weights: Array of asset weights
-            benchmark_returns: Optional benchmark returns
-            
-        Returns:
-            Dictionary of portfolio metrics
-        """
-        return calculate_portfolio_metrics(returns, weights, self.config, benchmark_returns)
+        self.portfolio_manager = PortfolioManager(config)
+        self.config = config or {}
+        logger.info("Portfolio Facade initialized")
     
-    def calculate_rolling_metrics(self, returns: pd.DataFrame, weights: np.ndarray, 
-                                window: int = 252) -> Dict[str, pd.Series]:
-        """Calculate rolling portfolio metrics
+    def load_data(self, price_data: pd.DataFrame) -> None:
+        """
+        Load price data into the portfolio system.
         
         Args:
-            returns: DataFrame of asset returns
-            weights: Array of asset weights
-            window: Rolling window size
-            
-        Returns:
-            Dictionary of rolling metrics
+            price_data (pd.DataFrame): DataFrame with asset prices
         """
-        return calculate_rolling_metrics(returns, weights, window, self.config)
+        self.portfolio_manager.load_data(price_data)
     
-    def compare_peers(self, price_history_map: Dict[str, List[float]], target: str, n: int = 5) -> Dict[str, Any]:
-        """Compare target to peers
+    def calculate_metrics(self, returns: pd.DataFrame, weights: Dict[str, float]) -> Dict[str, Any]:
+        """
+        Calculate portfolio metrics based on returns and weights.
         
         Args:
-            price_history_map: Dictionary mapping symbols to price histories
-            target: Target symbol
-            n: Number of peers to return
+            returns (pd.DataFrame): DataFrame of asset returns
+            weights (Dict[str, float]): Dictionary of asset weights
             
         Returns:
-            Dictionary with peer comparison results
+            Dict[str, Any]: Dictionary of portfolio metrics
         """
-        return peer_compare(price_history_map, target, n)
+        return self.portfolio_manager.calculate_metrics(returns, weights)
     
-    # Risk methods
-    def calculate_risk_metrics(self, returns: pd.Series) -> Dict[str, float]:
-        """Calculate risk metrics
+    def optimize_portfolio(self, 
+                          returns: pd.DataFrame, 
+                          objective: str = 'sharpe',
+                          risk_free_rate: float = 0.0,
+                          constraints: Optional[List[Dict]] = None,
+                          target_return: Optional[float] = None,
+                          target_volatility: Optional[float] = None) -> Dict[str, Any]:
+        """
+        Optimize a portfolio based on the specified objective.
         
         Args:
-            returns: Series of portfolio returns
-            
+            returns (pd.DataFrame): DataFrame of asset returns with assets as columns
+            objective (str, optional): Optimization objective.
+                Options: 'sharpe', 'min_volatility', 'max_return', 'target_return', 'target_risk'.
+                Defaults to 'sharpe'.
+            risk_free_rate (float, optional): Risk-free rate. Defaults to 0.0.
+            constraints (List[Dict], optional): List of constraints for optimization.
+            target_return (float, optional): Target return for 'target_return' objective.
+            target_volatility (float, optional): Target volatility for 'target_risk' objective.
+                
         Returns:
-            Dictionary of risk metrics
+            Dict[str, Any]: Optimization results
         """
-        return self.risk_analyzer.calculate_risk_metrics(returns)
-    
-    def run_stress_test(self, returns: pd.Series, weights: np.ndarray, 
-                       scenario: Optional[str] = None) -> Dict[str, Any]:
-        """Run stress test
-        
-        Args:
-            returns: Series of portfolio returns
-            weights: Array of asset weights
-            scenario: Stress scenario name
-            
-        Returns:
-            Dictionary with stress test results
-        """
-        return self.backtester.run_stress_test(returns, weights, scenario)
-    
-    # Optimization methods
-    def optimize(self, returns: pd.DataFrame, method: str = 'efficient_frontier', 
-                target_return: Optional[float] = None, risk_aversion: float = 1.0) -> np.ndarray:
-        """Optimize portfolio weights
-        
-        Args:
-            returns: DataFrame of asset returns
-            method: Optimization method
-            target_return: Target portfolio return
-            risk_aversion: Risk aversion parameter
-            
-        Returns:
-            Array of optimized weights
-        """
-        return optimize_portfolio(returns, method, target_return, risk_aversion, self.config)
-    
-    # Backtesting methods
-    def backtest(self, price_data: pd.DataFrame, strategy_func: Callable, 
-                initial_capital: float = 10000.0, start_date: Optional[str] = None, 
-                end_date: Optional[str] = None, benchmark_ticker: Optional[str] = None, 
-                rebalance_frequency: str = 'monthly') -> Dict[str, Any]:
-        """Backtest a portfolio strategy
-        
-        Args:
-            price_data: DataFrame of asset prices
-            strategy_func: Function that takes price_data and returns weights
-            initial_capital: Initial capital
-            start_date: Start date for backtest
-            end_date: End date for backtest
-            benchmark_ticker: Ticker for benchmark comparison
-            rebalance_frequency: Frequency to rebalance
-            
-        Returns:
-            Dictionary with backtest results
-        """
-        return self.backtester.backtest_strategy(
-            price_data=price_data,
-            strategy_func=strategy_func,
-            initial_capital=initial_capital,
-            start_date=start_date,
-            end_date=end_date,
-            benchmark_ticker=benchmark_ticker,
-            rebalance_frequency=rebalance_frequency
+        return optimize_portfolio(
+            returns=returns,
+            objective=objective,
+            risk_free_rate=risk_free_rate,
+            constraints=constraints,
+            target_return=target_return,
+            target_volatility=target_volatility
         )
     
-    def compare_strategies(self, price_data: pd.DataFrame, strategy_funcs: Dict[str, Callable], 
-                          initial_capital: float = 10000.0, start_date: Optional[str] = None, 
-                          end_date: Optional[str] = None, benchmark_ticker: Optional[str] = None, 
-                          rebalance_frequency: str = 'monthly') -> Dict[str, Any]:
-        """Compare multiple portfolio strategies
+    def calculate_statistics(self, 
+                            returns: pd.DataFrame, 
+                            benchmark_returns: Optional[pd.Series] = None,
+                            risk_free_rate: float = 0.0,
+                            period: str = 'daily') -> Dict[str, Any]:
+        """
+        Calculate comprehensive portfolio statistics.
         
         Args:
-            price_data: DataFrame of asset prices
-            strategy_funcs: Dictionary mapping strategy names to strategy functions
-            initial_capital: Initial capital
-            start_date: Start date for backtest
-            end_date: End date for backtest
-            benchmark_ticker: Ticker for benchmark comparison
-            rebalance_frequency: Frequency to rebalance
-            
+            returns (pd.DataFrame): DataFrame of portfolio returns
+            benchmark_returns (pd.Series, optional): Series of benchmark returns.
+            risk_free_rate (float, optional): Risk-free rate. Defaults to 0.0.
+            period (str, optional): Return period. Defaults to 'daily'.
+                Options: 'daily', 'weekly', 'monthly', 'annual'.
+                
         Returns:
-            Dictionary with comparison results
+            Dict[str, Any]: Dictionary containing portfolio statistics
         """
-        return self.backtester.compare_strategies(
-            price_data=price_data,
-            strategy_funcs=strategy_funcs,
-            initial_capital=initial_capital,
-            start_date=start_date,
-            end_date=end_date,
-            benchmark_ticker=benchmark_ticker,
-            rebalance_frequency=rebalance_frequency
+        return calculate_portfolio_statistics(
+            returns=returns,
+            benchmark_returns=benchmark_returns,
+            risk_free_rate=risk_free_rate,
+            period=period
         )
     
-    # Analysis methods
-    def calculate_sharpe_ratio(self, returns: pd.Series, risk_free_rate: Optional[float] = None) -> float:
-        """Calculate Sharpe ratio
+    def recommend_portfolio(self, 
+                           returns: pd.DataFrame, 
+                           risk_tolerance: str = "moderate") -> Dict[str, Any]:
+        """
+        Recommend an optimal portfolio based on risk tolerance.
         
         Args:
-            returns: Series of returns
-            risk_free_rate: Risk-free rate
-            
+            returns (pd.DataFrame): DataFrame of asset returns
+            risk_tolerance (str, optional): Risk tolerance level ("low", "moderate", "high").
+                Defaults to "moderate".
+                
         Returns:
-            Sharpe ratio
+            Dict[str, Any]: Dictionary with recommended portfolio
         """
-        if risk_free_rate is None:
-            risk_free_rate = self.config.risk_free_rate
-        return sharpe_ratio(returns, risk_free_rate)
+        return self.portfolio_manager.recommend_portfolio(returns, risk_tolerance)
     
-    def calculate_alpha_beta(self, returns: pd.Series, benchmark_returns: pd.Series, 
-                           risk_free_rate: Optional[float] = None) -> Dict[str, float]:
-        """Calculate alpha and beta
+    def analyze_exposures(self, 
+                         weights: Dict[str, float], 
+                         sector_map: Dict[str, str], 
+                         asset_class_map: Dict[str, str]) -> Dict[str, Any]:
+        """
+        Analyzes sector and asset class exposures of the portfolio.
         
         Args:
-            returns: Series of returns
-            benchmark_returns: Series of benchmark returns
-            risk_free_rate: Risk-free rate
+            weights (Dict[str, float]): Dictionary mapping symbols to weights
+            sector_map (Dict[str, str]): Dictionary mapping symbols to sectors
+            asset_class_map (Dict[str, str]): Dictionary mapping symbols to asset classes
             
         Returns:
-            Dictionary with alpha and beta
+            Dict[str, Any]: Dictionary with exposure analysis results
         """
-        if risk_free_rate is None:
-            risk_free_rate = self.config.risk_free_rate
-        return alpha_beta(returns, benchmark_returns, risk_free_rate)
+        return self.portfolio_manager.analyze_exposures(weights, sector_map, asset_class_map)
     
-    def analyze_performance(self, price_series: pd.Series) -> Dict[str, Any]:
-        """Analyze performance of a price series
+    def get_efficient_frontier(self, 
+                             returns: pd.DataFrame, 
+                             risk_free_rate: float = 0.0,
+                             n_points: int = 50) -> pd.DataFrame:
+        """
+        Generate the efficient frontier.
         
         Args:
-            price_series: Series of prices
-            
+            returns (pd.DataFrame): DataFrame of asset returns with assets as columns
+            risk_free_rate (float, optional): Risk-free rate. Defaults to 0.0.
+            n_points (int, optional): Number of points on the frontier. Defaults to 50.
+                
         Returns:
-            Dictionary with performance metrics
+            pd.DataFrame: DataFrame containing volatility, return, and sharpe ratio
         """
-        return performance_analysis(price_series)
+        optimizer = EfficientFrontier(returns=returns, risk_free_rate=risk_free_rate)
+        return optimizer.get_efficient_frontier(n_points=n_points)
     
-    def chart_performance(self, returns: pd.Series) -> Dict[str, pd.Series]:
-        """Chart performance by period
+    def self_assess_portfolio(self, weights: Dict[str, float]) -> Dict[str, Any]:
+        """
+        Self-assess portfolio quality and highlight potential issues.
         
         Args:
-            returns: Series of returns
+            weights (Dict[str, float]): Dictionary of asset weights
             
         Returns:
-            Dictionary with performance by period
+            Dict[str, Any]: Dictionary with assessment results
         """
-        return chart_performance(returns)
+        return self.portfolio_manager.self_assess_portfolio(weights)
+    
+    def rebalance_portfolio(self, 
+                           target_weights: Dict[str, float], 
+                           current_holdings: Dict[str, float], 
+                           total_value: float, 
+                           min_trade_size: float = 100) -> Dict[str, Any]:
+        """
+        Generate a rebalancing plan with optimized trading to minimize costs.
+        
+        Args:
+            target_weights (Dict[str, float]): Target portfolio weights
+            current_holdings (Dict[str, float]): Current holdings in dollar value
+            total_value (float): Total portfolio value
+            min_trade_size (float, optional): Minimum trade size to execute. Defaults to 100.
+            
+        Returns:
+            Dict[str, Any]: Dictionary with rebalancing plan
+        """
+        return self.portfolio_manager.advanced_rebalance_portfolio(
+            target_weights, current_holdings, total_value, min_trade_size
+        )

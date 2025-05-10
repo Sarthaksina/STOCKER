@@ -14,6 +14,23 @@
 - [ ] Update CONTRIBUTING.md with project standards
 - [ ] Update documentation to reflect upcoming changes
 
+### Project Structure Reorganization (Added 2023-12-05)
+- [ ] Reorganize project structure to match the target structure:
+  - [x] Consolidate core functionality into core/ directory
+  - [x] Consolidate data layer into data/ directory
+  - [x] Consolidate database layer into db/ directory
+  - [x] Consolidate feature engineering into features/ directory
+  - [ ] Consolidate ML components into ml/ directory 
+  - [x] Consolidate API components into api/ directory
+  - [x] Consolidate service components into services/ directory
+  - [x] Consolidate UI components into ui/ directory
+  - [x] Consolidate CLI components into cli/ directory
+  - [x] Consolidate intelligence layer into intelligence/ directory with: (Completed 2023-12-05)
+    - [x] Create llm.py for LLM utilities
+    - [x] Create news.py for news collection
+    - [x] Create rag.py for RAG pipeline
+    - [x] Create vector_store.py for vector database interactions
+
 ### Task 2: ThunderCompute Integration (Completed 2023-09-19)
 - [x] Create ThunderCompute account and generate API keys
 - [x] Set up CLI tools and authentication configuration
@@ -289,3 +306,6 @@
 - [ ] Add integration tests for end-to-end workflows
 - [ ] Add documentation generator for API and core components
 - [ ] Create code coverage reports for test suite
+
+### Project Structure Reorganization (Updated 2023-12-06)
+- [x] Consolidate feature engineering into features/ directory (Completed 2023-12-06)

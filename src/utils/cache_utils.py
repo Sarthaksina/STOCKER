@@ -1,23 +1,21 @@
-"""
-Cache utilities for storing and retrieving data with expiry.
+"""STOCKER Pro Cache Utilities Module
 
-This module provides functions to cache API responses and other data
-to improve performance and reduce API calls.
+This module provides caching functionality for the STOCKER Pro application.
+It includes utilities for saving and loading cached data with expiration handling.
 """
 
 import os
 import json
-import logging
 import hashlib
-from typing import Any, Dict, Optional, Union
+import logging
+from typing import Any, Optional, Union
 from pathlib import Path
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
 def _get_cache_path(cache_dir: Union[str, Path], key: str) -> Path:
-    """
-    Generate a cache file path from a cache key.
+    """Generate a cache file path from a cache key.
     
     Args:
         cache_dir: Directory for cache files
@@ -31,8 +29,7 @@ def _get_cache_path(cache_dir: Union[str, Path], key: str) -> Path:
     return Path(cache_dir) / filename
 
 def save_to_cache(cache_dir: Union[str, Path], key: str, data: Any) -> None:
-    """
-    Save data to cache with timestamp.
+    """Save data to cache with timestamp.
     
     Args:
         cache_dir: Directory for cache files
@@ -61,8 +58,7 @@ def save_to_cache(cache_dir: Union[str, Path], key: str, data: Any) -> None:
         logger.warning(f"Failed to save data to cache: {e}")
 
 def load_from_cache(cache_dir: Union[str, Path], key: str, expiry_hours: int = 24) -> Optional[Any]:
-    """
-    Load data from cache if it exists and is not expired.
+    """Load data from cache if it exists and is not expired.
     
     Args:
         cache_dir: Directory for cache files
@@ -99,8 +95,7 @@ def load_from_cache(cache_dir: Union[str, Path], key: str, expiry_hours: int = 2
         return None
 
 def clear_cache(cache_dir: Union[str, Path], older_than_hours: Optional[int] = None) -> int:
-    """
-    Clear all cache files or only those older than a specified time.
+    """Clear all cache files or only those older than a specified time.
     
     Args:
         cache_dir: Directory for cache files
@@ -110,62 +105,32 @@ def clear_cache(cache_dir: Union[str, Path], older_than_hours: Optional[int] = N
         Number of files deleted
     """
     try:
-        cache_dir_path = Path(cache_dir)
-        
-        if not cache_dir_path.exists():
+        cache_dir = Path(cache_dir)
+        if not cache_dir.exists():
             return 0
             
-        count = 0
-        for cache_file in cache_dir_path.glob('*.json'):
+        files_deleted = 0
+        current_time = datetime.now()
+        
+        for cache_file in cache_dir.glob('*.json'):
             try:
-                if older_than_hours is not None:
-                    # Read cache file to check timestamp
-                    with open(cache_file, 'r', encoding='utf-8') as f:
-                        cache_data = json.load(f)
-                        
-                    # Parse cache timestamp
-                    timestamp = datetime.fromisoformat(cache_data['timestamp'])
+                # Read file timestamp
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    cache_data = json.load(f)
+                timestamp = datetime.fromisoformat(cache_data['timestamp'])
+                
+                # Check if file should be deleted
+                if older_than_hours is None or \
+                   current_time - timestamp > timedelta(hours=older_than_hours):
+                    cache_file.unlink()
+                    files_deleted += 1
                     
-                    # Skip if not old enough
-                    if datetime.now() - timestamp <= timedelta(hours=older_than_hours):
-                        continue
-                
-                # Delete the file
-                os.remove(cache_file)
-                count += 1
-                
             except Exception as e:
-                logger.warning(f"Failed to delete cache file {cache_file}: {e}")
+                logger.warning(f"Error processing cache file {cache_file}: {e}")
+                continue
                 
-        logger.info(f"Cleared {count} cache files from {cache_dir}")
-        return count
+        return files_deleted
         
     except Exception as e:
-        logger.warning(f"Failed to clear cache: {e}")
+        logger.error(f"Error clearing cache: {e}")
         return 0
-
-def get_cache_size(cache_dir: Union[str, Path]) -> int:
-    """
-    Get the total size of all cache files in bytes.
-    
-    Args:
-        cache_dir: Directory for cache files
-        
-    Returns:
-        Total size in bytes
-    """
-    try:
-        cache_dir_path = Path(cache_dir)
-        
-        if not cache_dir_path.exists():
-            return 0
-            
-        total_size = 0
-        for cache_file in cache_dir_path.glob('*.json'):
-            total_size += os.path.getsize(cache_file)
-                
-        return total_size
-        
-    except Exception as e:
-        logger.warning(f"Failed to get cache size: {e}")
-        return 0 
