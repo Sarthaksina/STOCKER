@@ -1,0 +1,28 @@
+version: 1
+formatters:
+  standard:
+    format: '%(asctime)s %(levelname)s %(name)s: %(message)s'
+handlers:
+  console:
+    class: logging.StreamHandler
+    formatter: standard
+    level: INFO
+    stream: ext://sys.stdout
+  file:
+    class: logging.FileHandler
+    formatter: standard
+    level: INFO
+    filename: stocker.log
+    mode: a
+loggers:
+  __main__:
+    handlers: [console, file]
+    level: INFO
+    propagate: no
+  src:
+    handlers: [console, file]
+    level: INFO
+    propagate: yes
+root:
+  handlers: [console, file]
+  level: INFO

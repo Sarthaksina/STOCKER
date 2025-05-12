@@ -1,0 +1,84 @@
+# STOCKER Pro Configuration File
+
+# Environment: development, testing, or production
+environment: development
+
+# Project paths
+data_dir: data
+log_dir: logs
+
+# Database settings
+mongodb_uri: mongodb://localhost:27017
+db_name: stocker_db
+
+# Data source configuration
+data_source_config:
+  # Yahoo Finance settings
+  yahoo_finance_enabled: true
+  yahoo_cache_days: 7
+  
+  # Alpha Vantage settings
+  alpha_vantage_enabled: false
+  alpha_vantage_api_key: "YOUR_API_KEY_HERE"
+  alpha_vantage_requests_per_minute: 5
+  
+  # General data settings
+  default_start_date: "2010-01-01"
+  default_end_date: ""  # Empty means current date
+  data_cache_dir: cache
+
+# Model configuration
+model_config:
+  # General model settings
+  default_model: ensemble
+  model_save_dir: models
+  
+  # LSTM settings
+  lstm_units: 50
+  lstm_dropout: 0.2
+  lstm_recurrent_dropout: 0.2
+  lstm_epochs: 100
+  lstm_batch_size: 32
+  
+  # XGBoost settings
+  xgboost_max_depth: 6
+  xgboost_learning_rate: 0.01
+  xgboost_n_estimators: 1000
+  xgboost_objective: reg:squarederror
+  
+  # LightGBM settings
+  lightgbm_max_depth: 6
+  lightgbm_learning_rate: 0.01
+  lightgbm_n_estimators: 1000
+  lightgbm_objective: regression
+  
+  # Ensemble settings
+  ensemble_models:
+    - lstm
+    - xgboost
+    - lightgbm
+  ensemble_weights:
+    - 0.4
+    - 0.3
+    - 0.3
+
+# API configuration
+api_config:
+  host: 127.0.0.1
+  port: 8000
+  debug: false
+  enable_docs: true
+  cors_origins:
+    - "*"
+  rate_limit_enabled: false
+  rate_limit_requests: 100
+  rate_limit_period_seconds: 3600
+
+# Portfolio configuration
+portfolio_config:
+  risk_free_rate: 0.04
+  benchmark_symbol: SPY
+  rebalance_frequency: monthly
+  max_portfolio_size: 20
+  optimization_method: efficient_frontier
+  risk_tolerance: 0.5

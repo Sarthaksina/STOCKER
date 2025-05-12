@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>STOCKER Analytics Dashboard</title>
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0/css/bootstrap.min.css">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <h1>STOCKER Analytics Dashboard</h1>
+    </header>
+    <main class="container">
+        <section class="row">
+            <div class="col-md-6">
+                <h2>Holdings Analytics</h2>
+                <button onclick="fetchHoldings()">Run Holdings Analytics</button>
+                <div id="holdings-table"></div>
+                <pre id="holdings-result"></pre>
+            </div>
+            <div class="col-md-6">
+                <h2>Portfolio Optimization</h2>
+                <button onclick="fetchPortfolio()">Run Portfolio Optimization</button>
+                <div id="portfolio-table"></div>
+                <pre id="portfolio-result"></pre>
+            </div>
+        </section>
+        <section class="row">
+            <div class="col-md-12">
+                <h2>Live Price Chart</h2>
+                <input id="ticker-input" type="text" placeholder="Enter ticker (e.g. TCS.NS)" value="TCS.NS" />
+                <button onclick="fetchChart()">Show Chart</button>
+                <div id="chart"></div>
+            </div>
+        </section>
+        <section class="row">
+            <div class="col-md-12">
+                <h2>News Agent</h2>
+                <button onclick="fetchNews()">Get News</button>
+                <pre id="news-result"></pre>
+            </div>
+        </section>
+    </main>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <script>
+        async function fetchHoldings() {
+            const res = await fetch('/api/holdings');
+            const data = await res.json();
+            document.getElementById('holdings-result').textContent = JSON.stringify(data, null, 2);
+            // Table
+            let html = `<table class="table table-striped"><tr><th>Ticker</th><th>Price</th><th>Weight</th></tr>`;
+            for (const row of data.result) {
+                html += `<tr><td>${row.ticker}</td><td>${row.price.toFixed(2)}</td><td>${(row.weight*100).toFixed(2)}%</td></tr>`;
+            }
+            html += `</table>`;
+            document.getElementById('holdings-table').innerHTML = html;
+        }
+        async function fetchPortfolio() {
+            const res = await fetch('/api/portfolio-optimization');
+            const data = await res.json();
+            document.getElementById('portfolio-result').textContent = JSON.stringify(data, null, 2);
+            // Table
+            let html = `<table class="table table-striped"><tr><th>Asset</th><th>Weight</th></tr>`;
+            for (let i = 0; i < data.result.assets.length; i++) {
+                html += `<tr><td>${data.result.assets[i]}</td><td>${(data.result.weights[i]*100).toFixed(2)}%</td></tr>`;
+            }
+            html += `</table>`;
+            document.getElementById('portfolio-table').innerHTML = html;
+        }
+        async function fetchChart() {
+            const ticker = document.getElementById('ticker-input').value;
+            const res = await fetch(`/api/price-chart/${ticker}`);
+            const data = await res.json();
+            Plotly.newPlot('chart', JSON.parse(data.plotly_json).data, JSON.parse(data.plotly_json).layout);
+        }
+        async function fetchNews() {
+            const res = await fetch('/api/news');
+            const data = await res.json();
+            document.getElementById('news-result').textContent = JSON.stringify(data, null, 2);
+        }
+    </script>
+</body>
+</html>
